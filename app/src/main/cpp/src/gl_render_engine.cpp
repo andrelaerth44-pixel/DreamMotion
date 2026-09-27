@@ -34,10 +34,6 @@ void main() {
 }
 )";
 
-// Quad de composição: aUnit é o canto 0..1 do canvas (independente de resize,
-// diferente de uma versão em NDC fixo). O vértice aplica rotação+escala em
-// torno do centro do canvas e depois a translação — é isso que faz um frame
-// Interpolated mover/girar/escalar o conteúdo do keyframe de origem.
 const char* kCompositeVertexShader = R"(#version 300 es
 layout(location = 0) in vec2 aUnit;
 layout(location = 1) in vec2 aUV;
@@ -166,6 +162,33 @@ void GLRenderEngine::onTouchUp() {
     std::lock_guard<std::mutex> lock(queueMutex_);
     commandQueue_.push_back({RenderCommand::Kind::EndStroke});
     queueCv_.notify_all();
+}
+
+// --- Pincel atual ---
+
+void GLRenderEngine::setBrushColor(uint32_t argb) {
+    std::lock_guard<std::mutex> lock(timelineMutex_);
+    currentColorArgb_ = argb;
+}
+
+void GLRenderEngine::setBrushSize(float px) {
+    std::lock_guard<std::mutex> lock(timelineMutex_);
+    currentBrush_.baseSizePx = px;
+}
+
+void GLRenderEngine::setBrushHardness(float h) {
+    std::lock_guard<std::mutex> lock(timelineMutex_);
+    currentBrush_.hardness = h;
+}
+
+void GLRenderEngine::setEraserMode(bool enabled) {
+    std::lock_guard<std::mutex> lock(timelineMutex_);
+    currentBrush_.blendMode = enabled ? BlendMode::Erase : BlendMode::Normal;
+}
+
+bool GLRenderEngine::isEraserMode() {
+    std::lock_guard<std::mutex> lock(timelineMutex_);
+    return currentBrush_.blendMode == BlendMode::Erase;
 }
 
 // --- Camadas ---
@@ -380,8 +403,6 @@ bool GLRenderEngine::initEGL(ANativeWindow* window) {
     strokeProgram_ = linkProgram(kStrokeVertexShader, kStrokeFragmentShader);
     compositeProgram_ = linkProgram(kCompositeVertexShader, kCompositeFragmentShader);
 
-    // Cantos unitários (0..1) do canvas, não NDC fixo — o vértice multiplica por
-    // uViewportSize, então este VBO não precisa ser regerado em resize.
     float quad[] = {
         0, 0,  0, 1,
         1, 0,  1, 1,
@@ -449,7 +470,7 @@ void GLRenderEngine::renderLoop() {
                     Layer* layer = (frame && activeLayerIndex_ >= 0 && activeLayerIndex_ < (int) frame->layers.size())
                                        ? frame->layers[activeLayerIndex_].get() : nullptr;
                     if (layer && !layer->locked) {
-                        auto stroke = std::make_unique<Stroke>(nextStrokeId_++, Brush{}, 0xFF202020);
+                        auto stroke = std::make_unique<Stroke>(nextStrokeId_++, currentBrush_, currentColorArgb_);
                         stroke->addPoint(cmd.point);
                         activeStroke_ = stroke.get();
                         activeLayer_ = layer;
@@ -634,10 +655,6 @@ void GLRenderEngine::drawFrame() {
     std::lock_guard<std::mutex> lock(timelineMutex_);
     if (currentFrameIndex_ < 0 || currentFrameIndex_ >= (int) timeline_.frameCount()) return;
 
-    // Fonte do conteúdo (camadas): para um frame Interpolated, vem do keyframe/
-    // frame desenhado mais próximo. O Transform aplicado no compositing, por
-    // outro lado, é sempre resolvido para o índice pedido — é essa combinação
-    // que faz o conteúdo do keyframe "se mover" nos frames interpolados.
     Frame* renderFrame = timeline_.contentSourceFrame((size_t) currentFrameIndex_);
     Transform transform = timeline_.resolveTransformForFrameIndex((size_t) currentFrameIndex_);
     if (!renderFrame) return;

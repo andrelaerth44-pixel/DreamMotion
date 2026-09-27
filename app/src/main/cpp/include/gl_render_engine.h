@@ -21,11 +21,9 @@ struct RenderCommand {
 };
 
 // Motor de renderização OpenGL ES 3. Ver revisões anteriores para compositing por
-// FBO, VBO persistente de traços e playback automático. Esta revisão liga a
-// interpolação de keyframes (Timeline::resolveTransformForFrameIndex) ao
-// compositing de verdade: frames Interpolated agora reaproveitam o conteúdo do
-// keyframe anterior (Timeline::contentSourceFrame) e o compositeLayer aplica um
-// Transform (translate/scale/rotação/opacidade) real via shader.
+// FBO, VBO persistente, playback e interpolação de keyframes. Esta revisão
+// adiciona o pincel atual (cor/tamanho/dureza/borracha), configurável pela UI e
+// usado ao iniciar cada novo traço (antes disso, cor e Brush eram fixos).
 class GLRenderEngine {
 public:
     GLRenderEngine();
@@ -38,6 +36,13 @@ public:
     void onTouchDown(float x, float y, float pressure);
     void onTouchMove(float x, float y, float pressure);
     void onTouchUp();
+
+    // --- Pincel atual ---
+    void setBrushColor(uint32_t argb);
+    void setBrushSize(float px);
+    void setBrushHardness(float h);
+    void setEraserMode(bool enabled);
+    bool isEraserMode();
 
     // --- Camadas do frame corrente ---
     int layerCount();
@@ -58,10 +63,10 @@ public:
     void goToFrame(int index);
 
     // --- Keyframes / autoria de transform ---
-    int frameType(int index);              // 0=Drawn, 1=Keyframe, 2=Interpolated
+    int frameType(int index);
     void setFrameType(int index, int type);
     void nudgeFrameTransform(int index, float dTx, float dTy, float dScale, float dRotationDeg);
-    void appendInterpolatedFrame();        // adiciona um frame Interpolated ao final
+    void appendInterpolatedFrame();
 
     // --- Playback ---
     void play();
@@ -100,6 +105,11 @@ private:
     Timeline timeline_{24};
     int currentFrameIndex_ = 0;
     int activeLayerIndex_ = 0;
+
+    // Pincel corrente — protegido por timelineMutex_ também, já que é lido dentro
+    // do mesmo bloco crítico do BeginStroke (ver renderLoop).
+    uint32_t currentColorArgb_ = 0xFF202020;
+    Brush currentBrush_{};
 
     std::atomic<bool> playing_{false};
     std::chrono::steady_clock::time_point lastFrameTime_{};

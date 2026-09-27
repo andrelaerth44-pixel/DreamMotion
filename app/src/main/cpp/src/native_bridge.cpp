@@ -48,6 +48,33 @@ Java_com_tracostudio_dreams_engine_NativeEngine_nativeTouchUp(
     if (g_engine) g_engine->onTouchUp();
 }
 
+// --- Pincel atual ---
+
+JNIEXPORT void JNICALL
+Java_com_tracostudio_dreams_engine_NativeEngine_nativeSetBrushColor(JNIEnv*, jobject, jint argb) {
+    if (g_engine) g_engine->setBrushColor((uint32_t) argb);
+}
+
+JNIEXPORT void JNICALL
+Java_com_tracostudio_dreams_engine_NativeEngine_nativeSetBrushSize(JNIEnv*, jobject, jfloat px) {
+    if (g_engine) g_engine->setBrushSize(px);
+}
+
+JNIEXPORT void JNICALL
+Java_com_tracostudio_dreams_engine_NativeEngine_nativeSetBrushHardness(JNIEnv*, jobject, jfloat hardness) {
+    if (g_engine) g_engine->setBrushHardness(hardness);
+}
+
+JNIEXPORT void JNICALL
+Java_com_tracostudio_dreams_engine_NativeEngine_nativeSetEraserMode(JNIEnv*, jobject, jboolean enabled) {
+    if (g_engine) g_engine->setEraserMode(enabled == JNI_TRUE);
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_tracostudio_dreams_engine_NativeEngine_nativeIsEraserMode(JNIEnv*, jobject) {
+    return g_engine ? (jboolean) g_engine->isEraserMode() : JNI_FALSE;
+}
+
 // --- Camadas ---
 
 JNIEXPORT jint JNICALL

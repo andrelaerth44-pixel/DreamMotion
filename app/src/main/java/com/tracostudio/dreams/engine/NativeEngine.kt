@@ -19,6 +19,13 @@ object NativeEngine {
     external fun nativeTouchMove(x: Float, y: Float, pressure: Float)
     external fun nativeTouchUp()
 
+    // --- Pincel atual ---
+    external fun nativeSetBrushColor(argb: Int)
+    external fun nativeSetBrushSize(px: Float)
+    external fun nativeSetBrushHardness(hardness: Float)
+    external fun nativeSetEraserMode(enabled: Boolean)
+    external fun nativeIsEraserMode(): Boolean
+
     // --- Camadas do frame corrente ---
     external fun nativeGetLayerCount(): Int
     external fun nativeGetLayerName(index: Int): String
