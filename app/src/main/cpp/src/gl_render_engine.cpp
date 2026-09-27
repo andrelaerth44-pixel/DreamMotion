@@ -1,5 +1,7 @@
 #include "gl_render_engine.h"
+#include "project_io.h"
 #include <android/log.h>
+#include <cmath>
 
 #define LOG_TAG "DreamsGL"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
@@ -34,23 +36,35 @@ void main() {
 }
 )";
 
+// Duas etapas de transformação, ambas em torno do centro do canvas: primeiro o
+// Transform de animação do keyframe (uFrame*), depois a câmera de navegação do
+// usuário (uCam*) — independentes uma da outra por design.
 const char* kCompositeVertexShader = R"(#version 300 es
 layout(location = 0) in vec2 aUnit;
 layout(location = 1) in vec2 aUV;
 uniform vec2 uViewportSize;
-uniform vec2 uTranslate;
-uniform float uScale;
-uniform float uRotationRad;
+uniform vec2 uFrameTranslate;
+uniform float uFrameScale;
+uniform float uFrameRotationRad;
+uniform vec2 uCamTranslate;
+uniform float uCamZoom;
+uniform float uCamRotationRad;
 out vec2 vUV;
 void main() {
     vUV = aUV;
     vec2 pixelPos = aUnit * uViewportSize;
     vec2 center = uViewportSize * 0.5;
+
     vec2 p = pixelPos - center;
-    float c = cos(uRotationRad);
-    float s = sin(uRotationRad);
-    vec2 rotated = vec2(p.x * c - p.y * s, p.x * s + p.y * c) * uScale;
-    vec2 finalPos = rotated + center + uTranslate;
+    float fc = cos(uFrameRotationRad);
+    float fs = sin(uFrameRotationRad);
+    vec2 afterFrame = vec2(p.x * fc - p.y * fs, p.x * fs + p.y * fc) * uFrameScale + center + uFrameTranslate;
+
+    vec2 p2 = afterFrame - center;
+    float cc = cos(uCamRotationRad);
+    float cs = sin(uCamRotationRad);
+    vec2 finalPos = vec2(p2.x * cc - p2.y * cs, p2.x * cs + p2.y * cc) * uCamZoom + center + uCamTranslate;
+
     vec2 ndc = (finalPos / uViewportSize) * 2.0 - 1.0;
     gl_Position = vec4(ndc.x, -ndc.y, 0.0, 1.0);
 }
@@ -164,6 +178,60 @@ void GLRenderEngine::onTouchUp() {
     queueCv_.notify_all();
 }
 
+// --- Câmera ---
+
+void GLRenderEngine::panCamera(float dx, float dy) {
+    std::lock_guard<std::mutex> lock(timelineMutex_);
+    cameraTranslateX_ += dx;
+    cameraTranslateY_ += dy;
+}
+
+void GLRenderEngine::zoomCamera(float factor, float pivotScreenX, float pivotScreenY) {
+    std::lock_guard<std::mutex> lock(timelineMutex_);
+    float cx = width_ * 0.5f, cy = height_ * 0.5f;
+    float px = pivotScreenX - cx - cameraTranslateX_;
+    float py = pivotScreenY - cy - cameraTranslateY_;
+    float newZoom = cameraZoom_ * factor;
+    if (newZoom < 0.1f) newZoom = 0.1f;
+    if (newZoom > 10.f) newZoom = 10.f;
+    float ratio = newZoom / cameraZoom_;
+    // Mantém o ponto sob o pivot (aproximadamente — não leva a rotação da câmera
+    // em conta neste ajuste, só pan+zoom; combinado com rotação simultânea o
+    // pivot pode deslizar um pouco, aceitável para navegação gestual).
+    cameraTranslateX_ -= px * (ratio - 1.f);
+    cameraTranslateY_ -= py * (ratio - 1.f);
+    cameraZoom_ = newZoom;
+}
+
+void GLRenderEngine::rotateCamera(float deltaDeg) {
+    std::lock_guard<std::mutex> lock(timelineMutex_);
+    cameraRotationDeg_ += deltaDeg;
+}
+
+void GLRenderEngine::resetCamera() {
+    std::lock_guard<std::mutex> lock(timelineMutex_);
+    cameraTranslateX_ = 0.f;
+    cameraTranslateY_ = 0.f;
+    cameraZoom_ = 1.f;
+    cameraRotationDeg_ = 0.f;
+}
+
+DrawPoint GLRenderEngine::screenToCanvas(const DrawPoint& in) const {
+    float cx = width_ * 0.5f, cy = height_ * 0.5f;
+    float px = in.x - cx - cameraTranslateX_;
+    float py = in.y - cy - cameraTranslateY_;
+    float zoom = cameraZoom_ != 0.f ? cameraZoom_ : 1.f;
+    px /= zoom;
+    py /= zoom;
+    float rad = -cameraRotationDeg_ * kDegToRad;
+    float c = std::cos(rad);
+    float s = std::sin(rad);
+    DrawPoint out = in;
+    out.x = (px * c - py * s) + cx;
+    out.y = (px * s + py * c) + cy;
+    return out;
+}
+
 // --- Pincel atual ---
 
 void GLRenderEngine::setBrushColor(uint32_t argb) {
@@ -200,13 +268,11 @@ void GLRenderEngine::undo() {
     undoRecords_.pop_back();
 
     Frame* f = timeline_.frameAt((size_t) rec.frameIndex);
-    if (!f || rec.layerIndex < 0 || rec.layerIndex >= (int) f->layers.size()) return; // registro obsoleto (camada/frame removido), descarta
+    if (!f || rec.layerIndex < 0 || rec.layerIndex >= (int) f->layers.size()) return;
     Layer* layer = f->layers[rec.layerIndex].get();
     auto stroke = layer->popLastStroke();
     if (!stroke) return;
     if (activeLayer_ == layer && activeStroke_ == stroke.get()) {
-        // Estava desenhando exatamente esse traço quando o undo chegou; caso raro
-        // (ex.: botão de undo tocado no meio de um gesto), mas evita ponteiro solto.
         activeStroke_ = nullptr;
         activeLayer_ = nullptr;
     }
@@ -411,6 +477,27 @@ void GLRenderEngine::advancePlayback(double deltaMs) {
     }
 }
 
+// --- Projeto ---
+
+bool GLRenderEngine::saveProject(const std::string& path) {
+    std::lock_guard<std::mutex> lock(timelineMutex_);
+    return saveTimelineToFile(timeline_, path);
+}
+
+bool GLRenderEngine::loadProject(const std::string& path) {
+    std::lock_guard<std::mutex> lock(timelineMutex_);
+    bool ok = loadTimelineFromFile(timeline_, path);
+    if (ok) {
+        currentFrameIndex_ = 0;
+        activeLayerIndex_ = 0;
+        activeStroke_ = nullptr;
+        activeLayer_ = nullptr;
+        undoRecords_.clear();
+        redoRecords_.clear();
+    }
+    return ok;
+}
+
 // --- EGL / render loop ---
 
 bool GLRenderEngine::initEGL(ANativeWindow* window) {
@@ -515,13 +602,14 @@ void GLRenderEngine::renderLoop() {
                     Layer* layer = (frame && activeLayerIndex_ >= 0 && activeLayerIndex_ < (int) frame->layers.size())
                                        ? frame->layers[activeLayerIndex_].get() : nullptr;
                     if (layer && !layer->locked) {
+                        DrawPoint canvasPoint = screenToCanvas(cmd.point);
                         auto stroke = std::make_unique<Stroke>(nextStrokeId_++, currentBrush_, currentColorArgb_);
-                        stroke->addPoint(cmd.point);
+                        stroke->addPoint(canvasPoint);
                         activeStroke_ = stroke.get();
                         activeLayer_ = layer;
                         pendingUndoFrameIndex_ = currentFrameIndex_;
                         pendingUndoLayerIndex_ = activeLayerIndex_;
-                        redoRecords_.clear(); // nova ação do usuário invalida o redo, como em qualquer editor
+                        redoRecords_.clear();
                         layer->addStroke(std::move(stroke));
                     }
                     break;
@@ -529,7 +617,7 @@ void GLRenderEngine::renderLoop() {
                 case RenderCommand::Kind::AddPoint: {
                     std::lock_guard<std::mutex> lock(timelineMutex_);
                     if (activeStroke_) {
-                        activeStroke_->addPoint(cmd.point);
+                        activeStroke_->addPoint(screenToCanvas(cmd.point));
                         if (activeLayer_) activeLayer_->dirty = true;
                     }
                     break;
@@ -675,19 +763,22 @@ void GLRenderEngine::renderLayerContents(Layer& layer) {
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
-void GLRenderEngine::compositeLayer(const Layer& layer, const Transform& transform) {
+void GLRenderEngine::compositeLayer(const Layer& layer, const Transform& frameTransform) {
     glUseProgram(compositeProgram_);
     applyLayerBlendMode(layer.blendMode);
 
     glUniform2f(glGetUniformLocation(compositeProgram_, "uViewportSize"), (float) width_, (float) height_);
-    glUniform2f(glGetUniformLocation(compositeProgram_, "uTranslate"), transform.translateX, transform.translateY);
-    glUniform1f(glGetUniformLocation(compositeProgram_, "uScale"), transform.scale);
-    glUniform1f(glGetUniformLocation(compositeProgram_, "uRotationRad"), transform.rotationDeg * kDegToRad);
+    glUniform2f(glGetUniformLocation(compositeProgram_, "uFrameTranslate"), frameTransform.translateX, frameTransform.translateY);
+    glUniform1f(glGetUniformLocation(compositeProgram_, "uFrameScale"), frameTransform.scale);
+    glUniform1f(glGetUniformLocation(compositeProgram_, "uFrameRotationRad"), frameTransform.rotationDeg * kDegToRad);
+    glUniform2f(glGetUniformLocation(compositeProgram_, "uCamTranslate"), cameraTranslateX_, cameraTranslateY_);
+    glUniform1f(glGetUniformLocation(compositeProgram_, "uCamZoom"), cameraZoom_);
+    glUniform1f(glGetUniformLocation(compositeProgram_, "uCamRotationRad"), cameraRotationDeg_ * kDegToRad);
 
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, (GLuint) layer.textureHandle);
     glUniform1i(glGetUniformLocation(compositeProgram_, "uTexture"), 0);
-    glUniform1f(glGetUniformLocation(compositeProgram_, "uOpacity"), layer.opacity * transform.opacity);
+    glUniform1f(glGetUniformLocation(compositeProgram_, "uOpacity"), layer.opacity * frameTransform.opacity);
 
     glBindBuffer(GL_ARRAY_BUFFER, fullscreenQuadVbo_);
     glEnableVertexAttribArray(0);

@@ -39,24 +39,16 @@ public:
         return frames_.back().get();
     }
 
-    // Versão baseada em tempo contínuo (ticks acumulados via holdDurationTicks).
-    // Mantida para um futuro modelo de playback contínuo; o playback atual
-    // (GLRenderEngine::advancePlayback) trabalha diretamente em índice de frame
-    // e usa resolveTransformForFrameIndex abaixo, mais direto para esse caso.
+    // Descarta toda a timeline atual e recomeça com o framerate dado e 1 frame
+    // Drawn vazio — usado antes de carregar um projeto salvo (ver project_io.h).
+    void reset(int framerate) {
+        frames_.clear();
+        framerate_ = framerate > 0 ? framerate : 24;
+        frames_.push_back(std::make_unique<Frame>());
+    }
+
     Transform resolveTransformAtTick(int64_t tick) const;
-
-    // Resolve o Transform efetivo para um índice de frame específico, interpolando
-    // entre o KEYFRAME anterior e o próximo quando o frame é do tipo Interpolated.
-    // A fração t é a posição relativa real entre os dois índices de keyframe —
-    // substitui o antigo placeholder fixo (t = 0.5).
     Transform resolveTransformForFrameIndex(size_t frameIndex) const;
-
-    // Encontra o frame que efetivamente contém o desenho (camadas) a usar para
-    // renderizar o índice pedido: se o frame for Interpolated, caminha para trás
-    // até o frame desenhado/keyframe mais próximo. SIMPLIFICAÇÃO DESTA ITERAÇÃO:
-    // não existe (ainda) um conceito real de "mesma arte compartilhada entre
-    // keyframes" — o conteúdo vem sempre do keyframe anterior mais próximo, e não
-    // de um objeto de desenho único referenciado por vários keyframes.
     Frame* contentSourceFrame(size_t frameIndex) const;
 
 private:

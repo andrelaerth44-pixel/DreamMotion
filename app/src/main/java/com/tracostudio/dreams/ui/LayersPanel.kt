@@ -11,20 +11,17 @@ import android.widget.CheckBox
 import android.widget.LinearLayout
 import android.widget.TextView
 import com.tracostudio.dreams.engine.NativeEngine
+import java.io.File
 
 /**
- * Painel utilitário que expõe camadas, navegação/playback de timeline, e agora
- * também a autoria básica de keyframes (marcar um frame como Keyframe e ajustar
- * seu Transform com botões de nudge). Deliberadamente cru (Views programáticas).
+ * Painel utilitário que expõe camadas, navegação/playback de timeline, autoria
+ * de keyframes, e agora também salvar/carregar projeto e reset da câmera de
+ * navegação. Deliberadamente cru (Views programáticas, sem estilo).
  *
- * Fluxo para testar interpolação de verdade:
- * 1. Desenhe algo no frame 1, toque "Marcar Keyframe".
- * 2. Toque "+ Interpolado" (cria um frame vazio do tipo Interpolated).
- * 3. Toque "+ Frame", desenhe... na verdade o próximo Keyframe precisa ser
- *    marcado manualmente após criado — crie um frame, toque "Marcar Keyframe"
- *    de novo, e ajuste a posição/escala/rotação dele com os botões de nudge.
- * 4. Dê Play: o frame Interpolated no meio vai mostrar o desenho do primeiro
- *    keyframe se movendo/escalando/girando em direção à pose do segundo.
+ * Salvar/carregar é manual (botões), não automático: não há autosave nem
+ * carregamento automático ao abrir o app. O arquivo fica em
+ * context.filesDir/project.tdrm, formato binário próprio (ver project_io.h) —
+ * válido só para salvar/carregar no mesmo dispositivo/build, não é portável.
  */
 class LayersPanel(context: Context) : LinearLayout(context) {
 
@@ -47,6 +44,7 @@ class LayersPanel(context: Context) : LinearLayout(context) {
 
         addView(buildFrameRow())
         addView(buildKeyframeRow())
+        addView(buildProjectRow())
         addView(layerListContainer)
         addView(buildAddLayerButton())
 
@@ -127,6 +125,39 @@ class LayersPanel(context: Context) : LinearLayout(context) {
         row.addView(scaleDown); row.addView(scaleUp)
         row.addView(rotCcw); row.addView(rotCw)
         row.addView(addInterpolated)
+        return row
+    }
+
+    private fun buildProjectRow(): View {
+        val row = LinearLayout(context).apply {
+            orientation = HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        val projectFile = { File(context.filesDir, "project.tdrm").absolutePath }
+        val save = Button(context).apply {
+            text = "💾 Salvar"
+            setOnClickListener {
+                val ok = NativeEngine.nativeSaveProject(projectFile())
+                text = if (ok) "✓ Salvo" else "Falhou"
+                postDelayed({ text = "💾 Salvar" }, 1200)
+            }
+        }
+        val load = Button(context).apply {
+            text = "📂 Carregar"
+            setOnClickListener {
+                val ok = NativeEngine.nativeLoadProject(projectFile())
+                if (ok) refresh()
+                text = if (ok) "✓ Carregado" else "Sem projeto salvo"
+                postDelayed({ text = "📂 Carregar" }, 1200)
+            }
+        }
+        val resetCamera = Button(context).apply {
+            text = "⌖ Reset Câmera"
+            setOnClickListener { NativeEngine.nativeResetCamera() }
+        }
+        row.addView(save)
+        row.addView(load)
+        row.addView(resetCamera)
         return row
     }
 

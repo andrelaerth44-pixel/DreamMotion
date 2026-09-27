@@ -48,6 +48,29 @@ Java_com_tracostudio_dreams_engine_NativeEngine_nativeTouchUp(
     if (g_engine) g_engine->onTouchUp();
 }
 
+// --- Câmera ---
+
+JNIEXPORT void JNICALL
+Java_com_tracostudio_dreams_engine_NativeEngine_nativePanCamera(JNIEnv*, jobject, jfloat dx, jfloat dy) {
+    if (g_engine) g_engine->panCamera(dx, dy);
+}
+
+JNIEXPORT void JNICALL
+Java_com_tracostudio_dreams_engine_NativeEngine_nativeZoomCamera(
+        JNIEnv*, jobject, jfloat factor, jfloat pivotX, jfloat pivotY) {
+    if (g_engine) g_engine->zoomCamera(factor, pivotX, pivotY);
+}
+
+JNIEXPORT void JNICALL
+Java_com_tracostudio_dreams_engine_NativeEngine_nativeRotateCamera(JNIEnv*, jobject, jfloat deltaDeg) {
+    if (g_engine) g_engine->rotateCamera(deltaDeg);
+}
+
+JNIEXPORT void JNICALL
+Java_com_tracostudio_dreams_engine_NativeEngine_nativeResetCamera(JNIEnv*, jobject) {
+    if (g_engine) g_engine->resetCamera();
+}
+
 // --- Pincel atual ---
 
 JNIEXPORT void JNICALL
@@ -213,6 +236,26 @@ Java_com_tracostudio_dreams_engine_NativeEngine_nativePause(JNIEnv*, jobject) {
 JNIEXPORT jboolean JNICALL
 Java_com_tracostudio_dreams_engine_NativeEngine_nativeIsPlaying(JNIEnv*, jobject) {
     return g_engine ? (jboolean) g_engine->isPlaying() : JNI_FALSE;
+}
+
+// --- Projeto ---
+
+JNIEXPORT jboolean JNICALL
+Java_com_tracostudio_dreams_engine_NativeEngine_nativeSaveProject(JNIEnv* env, jobject, jstring path) {
+    if (!g_engine) return JNI_FALSE;
+    const char* chars = env->GetStringUTFChars(path, nullptr);
+    bool ok = g_engine->saveProject(chars ? chars : "");
+    if (chars) env->ReleaseStringUTFChars(path, chars);
+    return (jboolean) ok;
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_tracostudio_dreams_engine_NativeEngine_nativeLoadProject(JNIEnv* env, jobject, jstring path) {
+    if (!g_engine) return JNI_FALSE;
+    const char* chars = env->GetStringUTFChars(path, nullptr);
+    bool ok = g_engine->loadProject(chars ? chars : "");
+    if (chars) env->ReleaseStringUTFChars(path, chars);
+    return (jboolean) ok;
 }
 
 } // extern "C"

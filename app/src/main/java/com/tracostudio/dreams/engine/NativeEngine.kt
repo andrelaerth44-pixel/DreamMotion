@@ -19,6 +19,12 @@ object NativeEngine {
     external fun nativeTouchMove(x: Float, y: Float, pressure: Float)
     external fun nativeTouchUp()
 
+    // --- Câmera de navegação do canvas ---
+    external fun nativePanCamera(dx: Float, dy: Float)
+    external fun nativeZoomCamera(factor: Float, pivotX: Float, pivotY: Float)
+    external fun nativeRotateCamera(deltaDeg: Float)
+    external fun nativeResetCamera()
+
     // --- Pincel atual ---
     external fun nativeSetBrushColor(argb: Int)
     external fun nativeSetBrushSize(px: Float)
@@ -60,4 +66,8 @@ object NativeEngine {
     external fun nativePlay()
     external fun nativePause()
     external fun nativeIsPlaying(): Boolean
+
+    // --- Projeto (salvar/carregar) ---
+    external fun nativeSaveProject(path: String): Boolean
+    external fun nativeLoadProject(path: String): Boolean
 }

@@ -20,9 +20,6 @@ struct RenderCommand {
     float width = 0, height = 0;
 };
 
-// Registro de undo: aponta para onde um traço completo foi desenhado (índice de
-// frame + índice de camada). O traço em si permanece na Layer até undo() ser
-// chamado; só então é removido e guardado em RedoRecord para um possível redo.
 struct UndoRecord {
     int frameIndex;
     int layerIndex;
@@ -35,10 +32,14 @@ struct RedoRecord {
 };
 
 // Motor de renderização OpenGL ES 3. Ver revisões anteriores para compositing,
-// VBO persistente, playback, interpolação de keyframes e pincel configurável.
-// Esta revisão adiciona undo/redo em nível de traço: cada traço completo (não
-// cada ponto) vira uma entrada na pilha de undo; iniciar um traço novo limpa a
-// pilha de redo (comportamento padrão de qualquer editor).
+// VBO persistente, playback, keyframes, pincel e undo/redo. Esta revisão
+// adiciona:
+// 1) Câmera de navegação do canvas (pan/zoom/rotação via gesto de dois dedos),
+//    independente do Transform de animação dos keyframes — composta no mesmo
+//    shader como um segundo estágio de transformação. Toques de desenho (um
+//    dedo) são convertidos de coordenada de tela para coordenada de canvas via
+//    screenToCanvas antes de virar DrawPoint.
+// 2) Salvar/carregar projeto (ver project_io.h) para um arquivo binário próprio.
 class GLRenderEngine {
 public:
     GLRenderEngine();
@@ -51,6 +52,12 @@ public:
     void onTouchDown(float x, float y, float pressure);
     void onTouchMove(float x, float y, float pressure);
     void onTouchUp();
+
+    // --- Câmera de navegação do canvas (pan/zoom/rotação) ---
+    void panCamera(float dx, float dy);
+    void zoomCamera(float factor, float pivotScreenX, float pivotScreenY);
+    void rotateCamera(float deltaDeg);
+    void resetCamera();
 
     // --- Pincel atual ---
     void setBrushColor(uint32_t argb);
@@ -94,16 +101,21 @@ public:
     void pause();
     bool isPlaying();
 
+    // --- Projeto (salvar/carregar) ---
+    bool saveProject(const std::string& path);
+    bool loadProject(const std::string& path);
+
 private:
     void renderLoop();
     bool initEGL(ANativeWindow* window);
     void destroyEGL();
     void advancePlayback(double deltaMs);
+    DrawPoint screenToCanvas(const DrawPoint& in) const; // precisa ser chamado com timelineMutex_ já travado
 
     void drawFrame();
     void ensureLayerTarget(Layer& layer);
     void renderLayerContents(Layer& layer);
-    void compositeLayer(const Layer& layer, const Transform& transform);
+    void compositeLayer(const Layer& layer, const Transform& frameTransform);
 
     void ensureStrokeVboCapacity(size_t requiredBytes);
     static void appendStrokeQuadVertices(std::vector<float>& out, const Stroke& stroke);
@@ -126,6 +138,13 @@ private:
     Timeline timeline_{24};
     int currentFrameIndex_ = 0;
     int activeLayerIndex_ = 0;
+
+    // Câmera de navegação — protegida por timelineMutex_ (lida no BeginStroke/
+    // AddPoint para converter toque em coordenada de canvas, e no compositeLayer).
+    float cameraTranslateX_ = 0.f;
+    float cameraTranslateY_ = 0.f;
+    float cameraZoom_ = 1.f;
+    float cameraRotationDeg_ = 0.f;
 
     uint32_t currentColorArgb_ = 0xFF202020;
     Brush currentBrush_{};
