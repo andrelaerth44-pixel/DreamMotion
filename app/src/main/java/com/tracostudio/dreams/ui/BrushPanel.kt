@@ -12,12 +12,14 @@ import com.tracostudio.dreams.engine.NativeEngine
 
 /**
  * Painel utilitário de pincel: paleta de cores fixas, tamanho e dureza (SeekBar),
- * e alternador de borracha. Sem seletor de cor livre (roda HSV) ainda — é o
- * próximo passo óbvio se isso virar produto de verdade em vez de utilitário.
+ * borracha, e agora undo/redo (em nível de traço completo, não por ponto). Sem
+ * seletor de cor livre (roda HSV) ainda.
  */
 class BrushPanel(context: Context) : LinearLayout(context) {
 
     private val eraserButton = Button(context)
+    private val undoButton = Button(context)
+    private val redoButton = Button(context)
 
     private val palette = listOf(
         Color.parseColor("#202020"),
@@ -69,7 +71,17 @@ class BrushPanel(context: Context) : LinearLayout(context) {
                 text = if (nowEraser) "✓ Borracha" else "Borracha"
             }
         }
+        undoButton.apply {
+            text = "↶ Undo"
+            setOnClickListener { NativeEngine.nativeUndo() }
+        }
+        redoButton.apply {
+            text = "↷ Redo"
+            setOnClickListener { NativeEngine.nativeRedo() }
+        }
         row.addView(eraserButton)
+        row.addView(undoButton)
+        row.addView(redoButton)
         return row
     }
 
@@ -81,7 +93,7 @@ class BrushPanel(context: Context) : LinearLayout(context) {
         val label = TextView(context).apply { text = "Tamanho" }
         val seek = SeekBar(context).apply {
             max = 100
-            progress = 24 // corresponde ao baseSizePx padrão do Brush
+            progress = 24
             layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
             setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
                 override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
@@ -104,7 +116,7 @@ class BrushPanel(context: Context) : LinearLayout(context) {
         val label = TextView(context).apply { text = "Dureza" }
         val seek = SeekBar(context).apply {
             max = 100
-            progress = 75 // corresponde ao hardness padrão do Brush (0.75)
+            progress = 75
             layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
             setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
                 override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {

@@ -75,6 +75,28 @@ Java_com_tracostudio_dreams_engine_NativeEngine_nativeIsEraserMode(JNIEnv*, jobj
     return g_engine ? (jboolean) g_engine->isEraserMode() : JNI_FALSE;
 }
 
+// --- Undo / redo ---
+
+JNIEXPORT void JNICALL
+Java_com_tracostudio_dreams_engine_NativeEngine_nativeUndo(JNIEnv*, jobject) {
+    if (g_engine) g_engine->undo();
+}
+
+JNIEXPORT void JNICALL
+Java_com_tracostudio_dreams_engine_NativeEngine_nativeRedo(JNIEnv*, jobject) {
+    if (g_engine) g_engine->redo();
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_tracostudio_dreams_engine_NativeEngine_nativeCanUndo(JNIEnv*, jobject) {
+    return g_engine ? (jboolean) g_engine->canUndo() : JNI_FALSE;
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_tracostudio_dreams_engine_NativeEngine_nativeCanRedo(JNIEnv*, jobject) {
+    return g_engine ? (jboolean) g_engine->canRedo() : JNI_FALSE;
+}
+
 // --- Camadas ---
 
 JNIEXPORT jint JNICALL

@@ -191,6 +191,51 @@ bool GLRenderEngine::isEraserMode() {
     return currentBrush_.blendMode == BlendMode::Erase;
 }
 
+// --- Undo / redo ---
+
+void GLRenderEngine::undo() {
+    std::lock_guard<std::mutex> lock(timelineMutex_);
+    if (undoRecords_.empty()) return;
+    UndoRecord rec = undoRecords_.back();
+    undoRecords_.pop_back();
+
+    Frame* f = timeline_.frameAt((size_t) rec.frameIndex);
+    if (!f || rec.layerIndex < 0 || rec.layerIndex >= (int) f->layers.size()) return; // registro obsoleto (camada/frame removido), descarta
+    Layer* layer = f->layers[rec.layerIndex].get();
+    auto stroke = layer->popLastStroke();
+    if (!stroke) return;
+    if (activeLayer_ == layer && activeStroke_ == stroke.get()) {
+        // Estava desenhando exatamente esse traço quando o undo chegou; caso raro
+        // (ex.: botão de undo tocado no meio de um gesto), mas evita ponteiro solto.
+        activeStroke_ = nullptr;
+        activeLayer_ = nullptr;
+    }
+    redoRecords_.push_back({rec.frameIndex, rec.layerIndex, std::move(stroke)});
+}
+
+void GLRenderEngine::redo() {
+    std::lock_guard<std::mutex> lock(timelineMutex_);
+    if (redoRecords_.empty()) return;
+    RedoRecord rec = std::move(redoRecords_.back());
+    redoRecords_.pop_back();
+
+    Frame* f = timeline_.frameAt((size_t) rec.frameIndex);
+    if (!f || rec.layerIndex < 0 || rec.layerIndex >= (int) f->layers.size()) return;
+    Layer* layer = f->layers[rec.layerIndex].get();
+    layer->restoreStroke(std::move(rec.stroke));
+    undoRecords_.push_back({rec.frameIndex, rec.layerIndex});
+}
+
+bool GLRenderEngine::canUndo() {
+    std::lock_guard<std::mutex> lock(timelineMutex_);
+    return !undoRecords_.empty();
+}
+
+bool GLRenderEngine::canRedo() {
+    std::lock_guard<std::mutex> lock(timelineMutex_);
+    return !redoRecords_.empty();
+}
+
 // --- Camadas ---
 
 int GLRenderEngine::layerCount() {
@@ -474,6 +519,9 @@ void GLRenderEngine::renderLoop() {
                         stroke->addPoint(cmd.point);
                         activeStroke_ = stroke.get();
                         activeLayer_ = layer;
+                        pendingUndoFrameIndex_ = currentFrameIndex_;
+                        pendingUndoLayerIndex_ = activeLayerIndex_;
+                        redoRecords_.clear(); // nova ação do usuário invalida o redo, como em qualquer editor
                         layer->addStroke(std::move(stroke));
                     }
                     break;
@@ -488,7 +536,10 @@ void GLRenderEngine::renderLoop() {
                 }
                 case RenderCommand::Kind::EndStroke: {
                     std::lock_guard<std::mutex> lock(timelineMutex_);
-                    if (activeStroke_) activeStroke_->finish();
+                    if (activeStroke_) {
+                        activeStroke_->finish();
+                        undoRecords_.push_back({pendingUndoFrameIndex_, pendingUndoLayerIndex_});
+                    }
                     activeStroke_ = nullptr;
                     activeLayer_ = nullptr;
                     break;

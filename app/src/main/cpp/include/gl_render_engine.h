@@ -20,10 +20,25 @@ struct RenderCommand {
     float width = 0, height = 0;
 };
 
-// Motor de renderização OpenGL ES 3. Ver revisões anteriores para compositing por
-// FBO, VBO persistente, playback e interpolação de keyframes. Esta revisão
-// adiciona o pincel atual (cor/tamanho/dureza/borracha), configurável pela UI e
-// usado ao iniciar cada novo traço (antes disso, cor e Brush eram fixos).
+// Registro de undo: aponta para onde um traço completo foi desenhado (índice de
+// frame + índice de camada). O traço em si permanece na Layer até undo() ser
+// chamado; só então é removido e guardado em RedoRecord para um possível redo.
+struct UndoRecord {
+    int frameIndex;
+    int layerIndex;
+};
+
+struct RedoRecord {
+    int frameIndex;
+    int layerIndex;
+    std::unique_ptr<Stroke> stroke;
+};
+
+// Motor de renderização OpenGL ES 3. Ver revisões anteriores para compositing,
+// VBO persistente, playback, interpolação de keyframes e pincel configurável.
+// Esta revisão adiciona undo/redo em nível de traço: cada traço completo (não
+// cada ponto) vira uma entrada na pilha de undo; iniciar um traço novo limpa a
+// pilha de redo (comportamento padrão de qualquer editor).
 class GLRenderEngine {
 public:
     GLRenderEngine();
@@ -43,6 +58,12 @@ public:
     void setBrushHardness(float h);
     void setEraserMode(bool enabled);
     bool isEraserMode();
+
+    // --- Undo / redo (em nível de traço) ---
+    void undo();
+    void redo();
+    bool canUndo();
+    bool canRedo();
 
     // --- Camadas do frame corrente ---
     int layerCount();
@@ -106,10 +127,13 @@ private:
     int currentFrameIndex_ = 0;
     int activeLayerIndex_ = 0;
 
-    // Pincel corrente — protegido por timelineMutex_ também, já que é lido dentro
-    // do mesmo bloco crítico do BeginStroke (ver renderLoop).
     uint32_t currentColorArgb_ = 0xFF202020;
     Brush currentBrush_{};
+
+    std::vector<UndoRecord> undoRecords_;
+    std::vector<RedoRecord> redoRecords_;
+    int pendingUndoFrameIndex_ = -1;
+    int pendingUndoLayerIndex_ = -1;
 
     std::atomic<bool> playing_{false};
     std::chrono::steady_clock::time_point lastFrameTime_{};

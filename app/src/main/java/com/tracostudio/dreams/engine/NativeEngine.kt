@@ -26,6 +26,12 @@ object NativeEngine {
     external fun nativeSetEraserMode(enabled: Boolean)
     external fun nativeIsEraserMode(): Boolean
 
+    // --- Undo / redo (em nível de traço) ---
+    external fun nativeUndo()
+    external fun nativeRedo()
+    external fun nativeCanUndo(): Boolean
+    external fun nativeCanRedo(): Boolean
+
     // --- Camadas do frame corrente ---
     external fun nativeGetLayerCount(): Int
     external fun nativeGetLayerName(index: Int): String

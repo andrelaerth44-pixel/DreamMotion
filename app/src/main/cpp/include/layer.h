@@ -7,15 +7,29 @@
 
 namespace dreams {
 
-// Uma camada dentro de um Frame. No estado atual do compositing (ver
-// GLRenderEngine::drawFrame) os traços ainda são desenhados direto no framebuffer
-// padrão; textureHandle/fboHandle já existem na estrutura para quando o
-// compositing por camada (FBO próprio + blend mode) for implementado.
+// Uma camada dentro de um Frame. Ver GLRenderEngine para como o compositing por
+// FBO usa textureHandle/fboHandle. popLastStroke/restoreStroke existem para dar
+// suporte a undo/redo no nível de traço (ver GLRenderEngine::undo/redo).
 class Layer {
 public:
     explicit Layer(std::string layerName) : name(std::move(layerName)) {}
 
     void addStroke(std::unique_ptr<Stroke> stroke) {
+        strokes_.push_back(std::move(stroke));
+        dirty = true;
+    }
+
+    // Remove e devolve o último traço da camada (para undo). nullptr se vazia.
+    std::unique_ptr<Stroke> popLastStroke() {
+        if (strokes_.empty()) return nullptr;
+        auto s = std::move(strokes_.back());
+        strokes_.pop_back();
+        dirty = true;
+        return s;
+    }
+
+    // Devolve um traço previamente removido por popLastStroke (para redo).
+    void restoreStroke(std::unique_ptr<Stroke> stroke) {
         strokes_.push_back(std::move(stroke));
         dirty = true;
     }
@@ -28,9 +42,9 @@ public:
     float opacity = 1.f;
     BlendMode blendMode = BlendMode::Normal;
 
-    int textureHandle = -1; // -1 = ainda não alocado no backend gráfico
+    int textureHandle = -1;
     int fboHandle = -1;
-    bool dirty = true;      // conteúdo raster desatualizado em relação a strokes()
+    bool dirty = true;
 
 private:
     std::vector<std::unique_ptr<Stroke>> strokes_;
