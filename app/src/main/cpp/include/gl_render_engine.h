@@ -7,6 +7,7 @@
 #include <mutex>
 #include <condition_variable>
 #include <deque>
+#include <vector>
 #include "timeline.h"
 
 namespace dreams {
@@ -20,12 +21,16 @@ struct RenderCommand {
 };
 
 // Motor de renderização OpenGL ES 3, dono de sua própria EGL context/surface e de
-// uma thread de render dedicada — evita competir com a UI thread do Android, que
-// é o ganho de performance de mover a engine para C++/nativo em vez de GLSurfaceView.
+// uma thread de render dedicada — evita competir com a UI thread do Android.
 //
 // Compositing: cada Layer visível é renderizada para sua própria textura/FBO
 // (ensureLayerTarget + renderLayerContents) e depois composta no framebuffer
 // padrão como um quad texturizado (compositeLayer), com o blend mode da camada.
+//
+// Geometria de traço: um VBO persistente (strokeVbo_) é reaproveitado entre
+// desenhos — a geometria de um traço inteiro (todos os seus carimbos) é
+// montada em um std::vector no lado C++ e enviada em um único glBufferSubData
+// + um único glDrawArrays, em vez de criar/destruir um VBO por ponto.
 class GLRenderEngine {
 public:
     GLRenderEngine();
@@ -50,7 +55,9 @@ private:
     void ensureLayerTarget(Layer& layer);
     void renderLayerContents(Layer& layer);   // redesenha todos os traços da camada no seu FBO
     void compositeLayer(const Layer& layer);  // desenha a textura da camada no framebuffer padrão
-    void drawStrokeQuads(const Stroke& stroke, GLint colorLoc, GLint hardnessLoc);
+
+    void ensureStrokeVboCapacity(size_t requiredBytes);
+    static void appendStrokeQuadVertices(std::vector<float>& out, const Stroke& stroke);
 
     EGLDisplay display_ = EGL_NO_DISPLAY;
     EGLSurface surface_ = EGL_NO_SURFACE;
@@ -61,6 +68,10 @@ private:
     GLuint strokeProgram_ = 0;
     GLuint compositeProgram_ = 0;
     GLuint fullscreenQuadVbo_ = 0;
+
+    GLuint strokeVbo_ = 0;               // persistente, reaproveitado por traço/camada
+    size_t strokeVboCapacityBytes_ = 0;  // cresce (dobrando) sob demanda, nunca encolhe
+    std::vector<float> strokeVertexScratch_; // buffer CPU reaproveitado entre chamadas (evita realocar a cada traço)
 
     Timeline timeline_{24};
     Stroke* activeStroke_ = nullptr; // ponteiro bruto: dono é a Layer corrente
