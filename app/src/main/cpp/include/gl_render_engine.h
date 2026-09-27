@@ -8,29 +8,24 @@
 #include <condition_variable>
 #include <deque>
 #include <vector>
+#include <string>
 #include "timeline.h"
 
 namespace dreams {
 
-// Comando enfileirado pela thread de UI (via JNI) e consumido pela thread de
-// render nativa dedicada.
 struct RenderCommand {
     enum class Kind { AddPoint, BeginStroke, EndStroke, Resize, Shutdown } kind;
     DrawPoint point;
     float width = 0, height = 0;
 };
 
-// Motor de renderização OpenGL ES 3, dono de sua própria EGL context/surface e de
-// uma thread de render dedicada — evita competir com a UI thread do Android.
-//
-// Compositing: cada Layer visível é renderizada para sua própria textura/FBO
-// (ensureLayerTarget + renderLayerContents) e depois composta no framebuffer
-// padrão como um quad texturizado (compositeLayer), com o blend mode da camada.
-//
-// Geometria de traço: um VBO persistente (strokeVbo_) é reaproveitado entre
-// desenhos — a geometria de um traço inteiro (todos os seus carimbos) é
-// montada em um std::vector no lado C++ e enviada em um único glBufferSubData
-// + um único glDrawArrays, em vez de criar/destruir um VBO por ponto.
+// Motor de renderização OpenGL ES 3 com thread de render dedicada. Ver histórico
+// de comentários anteriores para o desenho de compositing por FBO e do VBO
+// persistente de traços. Esta revisão adiciona a API de estrutura (camadas e
+// frames) que a UI Kotlin usa para expor um painel de camadas + navegação de
+// timeline. Toda essa API é protegida por timelineMutex_, porque é chamada
+// diretamente da UI thread (via JNI) enquanto a render thread pode estar
+// iterando a mesma estrutura em drawFrame().
 class GLRenderEngine {
 public:
     GLRenderEngine();
@@ -44,7 +39,23 @@ public:
     void onTouchMove(float x, float y, float pressure);
     void onTouchUp();
 
-    Timeline& timeline() { return timeline_; }
+    // --- Camadas do frame corrente ---
+    int layerCount();
+    std::string layerName(int index);
+    bool layerVisible(int index);
+    float layerOpacity(int index);
+    void setLayerVisible(int index, bool visible);
+    void setLayerOpacity(int index, float opacity);
+    void setActiveLayer(int index); // camada que recebe novos traços
+    void addLayer(const std::string& name);
+    void removeLayer(int index);
+    void moveLayer(int fromIndex, int toIndex);
+
+    // --- Timeline ---
+    int frameCount();
+    int currentFrameIndex();
+    void addFrame();
+    void goToFrame(int index);
 
 private:
     void renderLoop();
@@ -53,8 +64,8 @@ private:
 
     void drawFrame();
     void ensureLayerTarget(Layer& layer);
-    void renderLayerContents(Layer& layer);   // redesenha todos os traços da camada no seu FBO
-    void compositeLayer(const Layer& layer);  // desenha a textura da camada no framebuffer padrão
+    void renderLayerContents(Layer& layer);
+    void compositeLayer(const Layer& layer);
 
     void ensureStrokeVboCapacity(size_t requiredBytes);
     static void appendStrokeQuadVertices(std::vector<float>& out, const Stroke& stroke);
@@ -69,13 +80,20 @@ private:
     GLuint compositeProgram_ = 0;
     GLuint fullscreenQuadVbo_ = 0;
 
-    GLuint strokeVbo_ = 0;               // persistente, reaproveitado por traço/camada
-    size_t strokeVboCapacityBytes_ = 0;  // cresce (dobrando) sob demanda, nunca encolhe
-    std::vector<float> strokeVertexScratch_; // buffer CPU reaproveitado entre chamadas (evita realocar a cada traço)
+    GLuint strokeVbo_ = 0;
+    size_t strokeVboCapacityBytes_ = 0;
+    std::vector<float> strokeVertexScratch_;
 
+    // Protege timeline_, currentFrameIndex_ e activeLayerIndex_ — tocados tanto
+    // pela render thread (renderLoop/drawFrame) quanto pela UI thread (métodos
+    // públicos acima, chamados via JNI a partir do painel de camadas).
+    std::mutex timelineMutex_;
     Timeline timeline_{24};
-    Stroke* activeStroke_ = nullptr; // ponteiro bruto: dono é a Layer corrente
-    Layer* activeLayer_ = nullptr;   // camada que contém activeStroke_, para marcar dirty por ponto
+    int currentFrameIndex_ = 0;
+    int activeLayerIndex_ = 0;
+
+    Stroke* activeStroke_ = nullptr;
+    Layer* activeLayer_ = nullptr;
     uint64_t nextStrokeId_ = 1;
 
     std::thread renderThread_;

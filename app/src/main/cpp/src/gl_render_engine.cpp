@@ -97,20 +97,12 @@ GLuint linkProgram(const char* vsSrc, const char* fsSrc) {
 
 void applyLayerBlendMode(BlendMode mode) {
     switch (mode) {
-        case BlendMode::Multiply:
-            glBlendFunc(GL_DST_COLOR, GL_ZERO);
-            break;
-        case BlendMode::Screen:
-            glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_COLOR);
-            break;
-        case BlendMode::Add:
-            glBlendFunc(GL_ONE, GL_ONE);
-            break;
+        case BlendMode::Multiply: glBlendFunc(GL_DST_COLOR, GL_ZERO); break;
+        case BlendMode::Screen: glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_COLOR); break;
+        case BlendMode::Add: glBlendFunc(GL_ONE, GL_ONE); break;
         case BlendMode::Normal:
         case BlendMode::Erase:
-        default:
-            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-            break;
+        default: glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA); break;
     }
 }
 
@@ -159,6 +151,119 @@ void GLRenderEngine::onTouchUp() {
     queueCv_.notify_all();
 }
 
+// --- Camadas ---
+
+int GLRenderEngine::layerCount() {
+    std::lock_guard<std::mutex> lock(timelineMutex_);
+    Frame* f = timeline_.frameAt((size_t) currentFrameIndex_);
+    return f ? (int) f->layers.size() : 0;
+}
+
+std::string GLRenderEngine::layerName(int index) {
+    std::lock_guard<std::mutex> lock(timelineMutex_);
+    Frame* f = timeline_.frameAt((size_t) currentFrameIndex_);
+    if (!f || index < 0 || index >= (int) f->layers.size()) return "";
+    return f->layers[index]->name;
+}
+
+bool GLRenderEngine::layerVisible(int index) {
+    std::lock_guard<std::mutex> lock(timelineMutex_);
+    Frame* f = timeline_.frameAt((size_t) currentFrameIndex_);
+    if (!f || index < 0 || index >= (int) f->layers.size()) return false;
+    return f->layers[index]->visible;
+}
+
+float GLRenderEngine::layerOpacity(int index) {
+    std::lock_guard<std::mutex> lock(timelineMutex_);
+    Frame* f = timeline_.frameAt((size_t) currentFrameIndex_);
+    if (!f || index < 0 || index >= (int) f->layers.size()) return 1.f;
+    return f->layers[index]->opacity;
+}
+
+void GLRenderEngine::setLayerVisible(int index, bool visible) {
+    std::lock_guard<std::mutex> lock(timelineMutex_);
+    Frame* f = timeline_.frameAt((size_t) currentFrameIndex_);
+    if (!f || index < 0 || index >= (int) f->layers.size()) return;
+    f->layers[index]->visible = visible;
+}
+
+void GLRenderEngine::setLayerOpacity(int index, float opacity) {
+    std::lock_guard<std::mutex> lock(timelineMutex_);
+    Frame* f = timeline_.frameAt((size_t) currentFrameIndex_);
+    if (!f || index < 0 || index >= (int) f->layers.size()) return;
+    f->layers[index]->opacity = opacity;
+}
+
+void GLRenderEngine::setActiveLayer(int index) {
+    std::lock_guard<std::mutex> lock(timelineMutex_);
+    activeLayerIndex_ = index;
+}
+
+void GLRenderEngine::addLayer(const std::string& name) {
+    std::lock_guard<std::mutex> lock(timelineMutex_);
+    Frame* f = timeline_.frameAt((size_t) currentFrameIndex_);
+    if (!f) return;
+    f->layers.push_back(std::make_unique<Layer>(name));
+    activeLayerIndex_ = (int) f->layers.size() - 1;
+}
+
+void GLRenderEngine::removeLayer(int index) {
+    std::lock_guard<std::mutex> lock(timelineMutex_);
+    Frame* f = timeline_.frameAt((size_t) currentFrameIndex_);
+    if (!f || index < 0 || index >= (int) f->layers.size()) return;
+    if (f->layers.size() <= 1) return; // mantém sempre ao menos 1 camada
+    if (activeStroke_ != nullptr && activeLayer_ == f->layers[index].get()) {
+        // Evita ponteiro pendurado se a camada ativa for removida no meio de um traço.
+        activeStroke_ = nullptr;
+        activeLayer_ = nullptr;
+    }
+    f->layers.erase(f->layers.begin() + index);
+    if (activeLayerIndex_ >= (int) f->layers.size()) activeLayerIndex_ = (int) f->layers.size() - 1;
+}
+
+void GLRenderEngine::moveLayer(int fromIndex, int toIndex) {
+    std::lock_guard<std::mutex> lock(timelineMutex_);
+    Frame* f = timeline_.frameAt((size_t) currentFrameIndex_);
+    if (!f) return;
+    int count = (int) f->layers.size();
+    if (fromIndex < 0 || fromIndex >= count || toIndex < 0 || toIndex >= count || fromIndex == toIndex) return;
+    auto moved = std::move(f->layers[fromIndex]);
+    f->layers.erase(f->layers.begin() + fromIndex);
+    f->layers.insert(f->layers.begin() + toIndex, std::move(moved));
+}
+
+// --- Timeline ---
+
+int GLRenderEngine::frameCount() {
+    std::lock_guard<std::mutex> lock(timelineMutex_);
+    return (int) timeline_.frameCount();
+}
+
+int GLRenderEngine::currentFrameIndex() {
+    std::lock_guard<std::mutex> lock(timelineMutex_);
+    return currentFrameIndex_;
+}
+
+void GLRenderEngine::addFrame() {
+    std::lock_guard<std::mutex> lock(timelineMutex_);
+    timeline_.appendFrame(FrameType::Drawn);
+    currentFrameIndex_ = (int) timeline_.frameCount() - 1;
+    activeLayerIndex_ = 0;
+    activeStroke_ = nullptr;
+    activeLayer_ = nullptr;
+}
+
+void GLRenderEngine::goToFrame(int index) {
+    std::lock_guard<std::mutex> lock(timelineMutex_);
+    if (index < 0 || index >= (int) timeline_.frameCount()) return;
+    currentFrameIndex_ = index;
+    activeLayerIndex_ = 0;
+    activeStroke_ = nullptr;
+    activeLayer_ = nullptr;
+}
+
+// --- EGL / render loop ---
+
 bool GLRenderEngine::initEGL(ANativeWindow* window) {
     display_ = eglGetDisplay(EGL_DEFAULT_DISPLAY);
     if (display_ == EGL_NO_DISPLAY) { LOGE("eglGetDisplay falhou"); return false; }
@@ -204,8 +309,6 @@ bool GLRenderEngine::initEGL(ANativeWindow* window) {
     glBindBuffer(GL_ARRAY_BUFFER, fullscreenQuadVbo_);
     glBufferData(GL_ARRAY_BUFFER, sizeof(quad), quad, GL_STATIC_DRAW);
 
-    // VBO persistente para geometria de traços: alocado sob demanda em
-    // ensureStrokeVboCapacity, nunca recriado por ponto/carimbo.
     glGenBuffers(1, &strokeVbo_);
 
     glEnable(GL_BLEND);
@@ -248,16 +351,20 @@ void GLRenderEngine::renderLoop() {
         bool shouldStop = false;
         for (auto& cmd : batch) {
             switch (cmd.kind) {
-                case RenderCommand::Kind::Resize:
+                case RenderCommand::Kind::Resize: {
+                    std::lock_guard<std::mutex> lock(timelineMutex_);
                     width_ = (int) cmd.width; height_ = (int) cmd.height;
-                    if (Frame* f = timeline_.frameAt(0)) {
+                    if (Frame* f = timeline_.frameAt((size_t) currentFrameIndex_)) {
                         for (auto& l : f->layers) { l->textureHandle = -1; l->fboHandle = -1; l->dirty = true; }
                     }
                     break;
+                }
                 case RenderCommand::Kind::BeginStroke: {
-                    Frame* frame = timeline_.frameAt(0);
-                    Layer* layer = (frame && !frame->layers.empty()) ? frame->layers[0].get() : nullptr;
-                    if (layer) {
+                    std::lock_guard<std::mutex> lock(timelineMutex_);
+                    Frame* frame = timeline_.frameAt((size_t) currentFrameIndex_);
+                    Layer* layer = (frame && activeLayerIndex_ >= 0 && activeLayerIndex_ < (int) frame->layers.size())
+                                       ? frame->layers[activeLayerIndex_].get() : nullptr;
+                    if (layer && !layer->locked) {
                         auto stroke = std::make_unique<Stroke>(nextStrokeId_++, Brush{}, 0xFF202020);
                         stroke->addPoint(cmd.point);
                         activeStroke_ = stroke.get();
@@ -266,17 +373,21 @@ void GLRenderEngine::renderLoop() {
                     }
                     break;
                 }
-                case RenderCommand::Kind::AddPoint:
+                case RenderCommand::Kind::AddPoint: {
+                    std::lock_guard<std::mutex> lock(timelineMutex_);
                     if (activeStroke_) {
                         activeStroke_->addPoint(cmd.point);
                         if (activeLayer_) activeLayer_->dirty = true;
                     }
                     break;
-                case RenderCommand::Kind::EndStroke:
+                }
+                case RenderCommand::Kind::EndStroke: {
+                    std::lock_guard<std::mutex> lock(timelineMutex_);
                     if (activeStroke_) activeStroke_->finish();
                     activeStroke_ = nullptr;
                     activeLayer_ = nullptr;
                     break;
+                }
                 case RenderCommand::Kind::Shutdown:
                     shouldStop = true;
                     break;
@@ -331,10 +442,6 @@ void GLRenderEngine::ensureStrokeVboCapacity(size_t requiredBytes) {
 }
 
 void GLRenderEngine::appendStrokeQuadVertices(std::vector<float>& out, const Stroke& stroke) {
-    // 6 vértices (2 triângulos) por carimbo, em vez de 4 vértices em TRIANGLE_STRIP —
-    // com TRIANGLES, os carimbos de um mesmo traço podem ser concatenados num único
-    // vetor/VBO/draw call sem gerar triângulos-fantasma conectando um carimbo ao
-    // próximo, como aconteceria emendando strips diferentes.
     for (const auto& p : stroke.points()) {
         float size = stroke.brush().baseSizePx *
             (stroke.brush().pressureAffectsSize
@@ -384,9 +491,6 @@ void GLRenderEngine::renderLayerContents(Layer& layer) {
 
         size_t bytes = strokeVertexScratch_.size() * sizeof(float);
         ensureStrokeVboCapacity(bytes);
-        // Upload único para o traço inteiro (todos os seus carimbos) no VBO
-        // persistente — substitui o antigo padrão de 1 VBO gerado/destruído por
-        // ponto por um único glBufferSubData + glDrawArrays por traço.
         glBindBuffer(GL_ARRAY_BUFFER, strokeVbo_);
         glBufferSubData(GL_ARRAY_BUFFER, 0, (GLsizeiptr) bytes, strokeVertexScratch_.data());
 
@@ -432,7 +536,8 @@ void GLRenderEngine::drawFrame() {
     glClearColor(0.93f, 0.93f, 0.93f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT);
 
-    Frame* frame = timeline_.frameAt(0);
+    std::lock_guard<std::mutex> lock(timelineMutex_);
+    Frame* frame = timeline_.frameAt((size_t) currentFrameIndex_);
     if (!frame) return;
 
     for (auto& layerPtr : frame->layers) {
