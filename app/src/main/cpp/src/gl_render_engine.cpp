@@ -96,6 +96,28 @@ GLuint linkProgram(const char* vsSrc, const char* fsSrc) {
     return program;
 }
 
+// Aplica o blend fixo-function mais próximo do blend mode da camada. Multiply/Screen
+// são aproximações via fixed-function blend (funcionam bem na prática); um blend
+// "correto" por pixel exigiria um shader de blend dedicado — fica como TODO futuro.
+void applyLayerBlendMode(BlendMode mode) {
+    switch (mode) {
+        case BlendMode::Multiply:
+            glBlendFunc(GL_DST_COLOR, GL_ZERO);
+            break;
+        case BlendMode::Screen:
+            glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_COLOR);
+            break;
+        case BlendMode::Add:
+            glBlendFunc(GL_ONE, GL_ONE);
+            break;
+        case BlendMode::Normal:
+        case BlendMode::Erase:
+        default:
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            break;
+    }
+}
+
 } // namespace
 
 GLRenderEngine::GLRenderEngine() = default;
@@ -176,6 +198,21 @@ bool GLRenderEngine::initEGL(ANativeWindow* window) {
     strokeProgram_ = linkProgram(kStrokeVertexShader, kStrokeFragmentShader);
     compositeProgram_ = linkProgram(kCompositeVertexShader, kCompositeFragmentShader);
 
+    // Quad de tela cheia para o composite: posição NDC + UV. V é invertido (1-v)
+    // porque a textura da camada foi preenchida com a mesma convenção de pixel-
+    // para-NDC usada no framebuffer padrão (ver kStrokeVertexShader); ao amostrar
+    // de volta como textura isso equivale a uma inversão vertical que precisa ser
+    // compensada aqui. Vale reconferir isso visualmente ao rodar em dispositivo real.
+    float quad[] = {
+        -1, -1,  0, 1,
+         1, -1,  1, 1,
+        -1,  1,  0, 0,
+         1,  1,  1, 0,
+    };
+    glGenBuffers(1, &fullscreenQuadVbo_);
+    glBindBuffer(GL_ARRAY_BUFFER, fullscreenQuadVbo_);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(quad), quad, GL_STATIC_DRAW);
+
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     return strokeProgram_ != 0 && compositeProgram_ != 0;
@@ -218,7 +255,11 @@ void GLRenderEngine::renderLoop() {
             switch (cmd.kind) {
                 case RenderCommand::Kind::Resize:
                     width_ = (int) cmd.width; height_ = (int) cmd.height;
-                    glViewport(0, 0, width_, height_);
+                    // Camadas já alocadas têm FBOs no tamanho antigo; a forma mais
+                    // simples de lidar com resize por ora é forçar realocação.
+                    if (Frame* f = timeline_.frameAt(0)) {
+                        for (auto& l : f->layers) { l->textureHandle = -1; l->fboHandle = -1; l->dirty = true; }
+                    }
                     break;
                 case RenderCommand::Kind::BeginStroke: {
                     Frame* frame = timeline_.frameAt(0);
@@ -227,15 +268,21 @@ void GLRenderEngine::renderLoop() {
                         auto stroke = std::make_unique<Stroke>(nextStrokeId_++, Brush{}, 0xFF202020);
                         stroke->addPoint(cmd.point);
                         activeStroke_ = stroke.get();
-                        layer->addStroke(std::move(stroke));
+                        activeLayer_ = layer;
+                        layer->addStroke(std::move(stroke)); // já marca layer->dirty = true
                     }
                     break;
                 }
                 case RenderCommand::Kind::AddPoint:
-                    if (activeStroke_) activeStroke_->addPoint(cmd.point);
+                    if (activeStroke_) {
+                        activeStroke_->addPoint(cmd.point);
+                        if (activeLayer_) activeLayer_->dirty = true;
+                    }
                     break;
                 case RenderCommand::Kind::EndStroke:
-                    if (activeStroke_) { activeStroke_->finish(); activeStroke_ = nullptr; }
+                    if (activeStroke_) activeStroke_->finish();
+                    activeStroke_ = nullptr;
+                    activeLayer_ = nullptr;
                     break;
                 case RenderCommand::Kind::Shutdown:
                     shouldStop = true;
@@ -253,67 +300,136 @@ void GLRenderEngine::renderLoop() {
     LOGI("Render thread nativa encerrada");
 }
 
-void GLRenderEngine::drawFrame() {
-    glClearColor(0.93f, 0.93f, 0.93f, 1.0f);
-    glClear(GL_COLOR_BUFFER_BIT);
+void GLRenderEngine::ensureLayerTarget(Layer& layer) {
+    if (layer.textureHandle != -1) return;
 
-    // Estado atual: desenha direto no framebuffer padrão usando o programa de
-    // stroke, um quad por ponto do traço (sem compor via FBO por camada ainda —
-    // ver renderStrokeToLayer/compositeLayer para o próximo passo).
-    Frame* frame = timeline_.frameAt(0);
-    if (!frame) return;
+    GLuint tex;
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width_, height_, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 
-    glUseProgram(strokeProgram_);
-    GLint viewportLoc = glGetUniformLocation(strokeProgram_, "uViewportSize");
-    glUniform2f(viewportLoc, (float) width_, (float) height_);
-    GLint colorLoc = glGetUniformLocation(strokeProgram_, "uColor");
-    GLint hardnessLoc = glGetUniformLocation(strokeProgram_, "uHardness");
+    GLuint fbo;
+    glGenFramebuffers(1, &fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex, 0);
 
-    for (auto& layer : frame->layers) {
-        if (!layer->visible) continue;
-        for (auto& strokePtr : layer->strokes()) {
-            const Stroke& stroke = *strokePtr;
-            float r = ((stroke.color() >> 16) & 0xFF) / 255.f;
-            float g = ((stroke.color() >> 8) & 0xFF) / 255.f;
-            float b = (stroke.color() & 0xFF) / 255.f;
-            float a = ((stroke.color() >> 24) & 0xFF) / 255.f * stroke.brush().opacity;
-            glUniform4f(colorLoc, r, g, b, a);
-            glUniform1f(hardnessLoc, stroke.brush().hardness);
+    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+        LOGE("FBO da camada '%s' incompleto", layer.name.c_str());
+    }
 
-            for (const auto& p : stroke.points()) {
-                float size = stroke.brush().baseSizePx *
-                    (stroke.brush().pressureAffectsSize
-                         ? (stroke.brush().minSizeFactor + (1.f - stroke.brush().minSizeFactor) * p.pressure)
-                         : 1.f);
-                float half = size * 0.5f;
-                // Quad em torno do ponto; UV local em [-1,1] usado no fragment
-                // shader para desenhar o carimbo circular com borda suave.
-                float verts[] = {
-                    p.x - half, p.y - half, -1, -1,
-                    p.x + half, p.y - half,  1, -1,
-                    p.x - half, p.y + half, -1,  1,
-                    p.x + half, p.y + half,  1,  1,
-                };
-                // NOTA DE PERFORMANCE: um VBO por ponto por frame é simples e
-                // correto, mas está longe do ideal — o próximo passo de
-                // performance é um VBO persistente (buffer circular) ou
-                // instancing em vez de gen/delete a cada carimbo.
-                GLuint vbo;
-                glGenBuffers(1, &vbo);
-                glBindBuffer(GL_ARRAY_BUFFER, vbo);
-                glBufferData(GL_ARRAY_BUFFER, sizeof(verts), verts, GL_DYNAMIC_DRAW);
-                glEnableVertexAttribArray(0);
-                glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void*) 0);
-                glEnableVertexAttribArray(1);
-                glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void*) (2 * sizeof(float)));
-                glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-                glDeleteBuffers(1, &vbo);
-            }
-        }
+    layer.textureHandle = (int) tex;
+    layer.fboHandle = (int) fbo;
+    layer.dirty = true;
+
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+}
+
+void GLRenderEngine::drawStrokeQuads(const Stroke& stroke, GLint colorLoc, GLint hardnessLoc) {
+    float r = ((stroke.color() >> 16) & 0xFF) / 255.f;
+    float g = ((stroke.color() >> 8) & 0xFF) / 255.f;
+    float b = (stroke.color() & 0xFF) / 255.f;
+    float a = ((stroke.color() >> 24) & 0xFF) / 255.f * stroke.brush().opacity;
+    glUniform4f(colorLoc, r, g, b, a);
+    glUniform1f(hardnessLoc, stroke.brush().hardness);
+
+    for (const auto& p : stroke.points()) {
+        float size = stroke.brush().baseSizePx *
+            (stroke.brush().pressureAffectsSize
+                 ? (stroke.brush().minSizeFactor + (1.f - stroke.brush().minSizeFactor) * p.pressure)
+                 : 1.f);
+        float half = size * 0.5f;
+        float verts[] = {
+            p.x - half, p.y - half, -1, -1,
+            p.x + half, p.y - half,  1, -1,
+            p.x - half, p.y + half, -1,  1,
+            p.x + half, p.y + half,  1,  1,
+        };
+        // NOTA DE PERFORMANCE: um VBO por ponto por frame é simples e correto,
+        // mas está longe do ideal — o próximo passo óbvio é um VBO persistente
+        // (buffer circular) ou instancing em vez de gen/delete a cada carimbo.
+        GLuint vbo;
+        glGenBuffers(1, &vbo);
+        glBindBuffer(GL_ARRAY_BUFFER, vbo);
+        glBufferData(GL_ARRAY_BUFFER, sizeof(verts), verts, GL_DYNAMIC_DRAW);
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void*) 0);
+        glEnableVertexAttribArray(1);
+        glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void*) (2 * sizeof(float)));
+        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+        glDeleteBuffers(1, &vbo);
     }
 }
 
-void GLRenderEngine::compositeLayer(const Layer&) { /* TODO: compositing via FBO por camada */ }
-void GLRenderEngine::renderStrokeToLayer(const Stroke&, const Layer&) { /* TODO */ }
+void GLRenderEngine::renderLayerContents(Layer& layer) {
+    ensureLayerTarget(layer);
+    glBindFramebuffer(GL_FRAMEBUFFER, (GLuint) layer.fboHandle);
+    glViewport(0, 0, width_, height_);
+    glClearColor(0.f, 0.f, 0.f, 0.f); // camada começa transparente, não branca
+    glClear(GL_COLOR_BUFFER_BIT);
+
+    glUseProgram(strokeProgram_);
+    glUniform2f(glGetUniformLocation(strokeProgram_, "uViewportSize"), (float) width_, (float) height_);
+    GLint colorLoc = glGetUniformLocation(strokeProgram_, "uColor");
+    GLint hardnessLoc = glGetUniformLocation(strokeProgram_, "uHardness");
+
+    for (auto& strokePtr : layer.strokes()) {
+        const Stroke& stroke = *strokePtr;
+        if (stroke.brush().blendMode == BlendMode::Erase) {
+            // Borracha: reduz o alpha já presente na camada em vez de somar cor.
+            glBlendFunc(GL_ZERO, GL_ONE_MINUS_SRC_ALPHA);
+        } else {
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        }
+        drawStrokeQuads(stroke, colorLoc, hardnessLoc);
+    }
+
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+}
+
+void GLRenderEngine::compositeLayer(const Layer& layer) {
+    glUseProgram(compositeProgram_);
+    applyLayerBlendMode(layer.blendMode);
+
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, (GLuint) layer.textureHandle);
+    glUniform1i(glGetUniformLocation(compositeProgram_, "uTexture"), 0);
+    glUniform1f(glGetUniformLocation(compositeProgram_, "uOpacity"), layer.opacity);
+
+    glBindBuffer(GL_ARRAY_BUFFER, fullscreenQuadVbo_);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void*) 0);
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void*) (2 * sizeof(float)));
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+}
+
+void GLRenderEngine::drawFrame() {
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glViewport(0, 0, width_, height_);
+    glClearColor(0.93f, 0.93f, 0.93f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+
+    Frame* frame = timeline_.frameAt(0);
+    if (!frame) return;
+
+    for (auto& layerPtr : frame->layers) {
+        Layer& layer = *layerPtr;
+        if (!layer.visible) continue;
+        ensureLayerTarget(layer);
+        if (layer.dirty) {
+            renderLayerContents(layer); // redesenha todos os traços da camada no seu FBO
+            layer.dirty = false;
+        }
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        glViewport(0, 0, width_, height_);
+        compositeLayer(layer);
+    }
+
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA); // restaura o blend padrão
+}
 
 } // namespace dreams
