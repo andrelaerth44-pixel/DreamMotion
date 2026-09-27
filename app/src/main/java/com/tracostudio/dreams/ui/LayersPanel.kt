@@ -2,6 +2,8 @@ package com.tracostudio.dreams.ui
 
 import android.content.Context
 import android.graphics.Color
+import android.os.Handler
+import android.os.Looper
 import android.view.Gravity
 import android.view.View
 import android.widget.Button
@@ -11,20 +13,33 @@ import android.widget.TextView
 import com.tracostudio.dreams.engine.NativeEngine
 
 /**
- * Painel utilitário que expõe as camadas e a navegação de frames que já funcionam
- * na engine nativa. Deliberadamente cru (Views programáticas, sem estilo) — o
- * objetivo aqui é expor a funcionalidade que a engine já tem, não desenhar a UI
- * final do produto (isso vem depois, com direção visual de verdade).
+ * Painel utilitário que expõe as camadas, a navegação de frames e o playback da
+ * timeline que já funcionam na engine nativa. Deliberadamente cru (Views
+ * programáticas, sem estilo) — o objetivo aqui é expor a funcionalidade que a
+ * engine já tem, não desenhar a UI final do produto.
  *
- * Não há nenhum mecanismo de observação entre a engine nativa e este painel:
- * cada botão chama a JNI diretamente e depois pede refresh() a si mesmo. Isso
- * cobre o caso de uso atual (a estrutura de camadas/frames só muda por ação do
- * usuário neste painel), mas deixa de refletir mudanças feitas por outro caminho.
+ * Durante o playback, quem avança os frames é a própria render thread nativa
+ * (ver GLRenderEngine::advancePlayback) — este painel só faz polling leve
+ * (a cada 100ms) pra manter o rótulo "Frame X/Y" sincronizado enquanto toca.
+ *
+ * NOTA: desenhar enquanto o playback está ativo não é bloqueado hoje — um
+ * toque durante o play adiciona um traço a qualquer frame que estiver passando
+ * naquele instante. Isso é um comportamento a refinar (ex.: pausar
+ * automaticamente ao detectar um toque no canvas).
  */
 class LayersPanel(context: Context) : LinearLayout(context) {
 
     private val frameLabel = TextView(context)
     private val layerListContainer = LinearLayout(context).apply { orientation = VERTICAL }
+    private val playButton = Button(context)
+
+    private val handler = Handler(Looper.getMainLooper())
+    private val playbackTick = object : Runnable {
+        override fun run() {
+            updateFrameLabel()
+            if (NativeEngine.nativeIsPlaying()) handler.postDelayed(this, 100)
+        }
+    }
 
     init {
         orientation = VERTICAL
@@ -61,10 +76,26 @@ class LayersPanel(context: Context) : LinearLayout(context) {
             text = "+ Frame"
             setOnClickListener { NativeEngine.nativeAddFrame(); refresh() }
         }
+        playButton.apply {
+            text = "▶ Play"
+            setOnClickListener {
+                if (NativeEngine.nativeIsPlaying()) {
+                    NativeEngine.nativePause()
+                    text = "▶ Play"
+                    handler.removeCallbacks(playbackTick)
+                    refresh() // playback pode ter mudado a camada/frame corrente
+                } else {
+                    NativeEngine.nativePlay()
+                    text = "⏸ Pause"
+                    handler.post(playbackTick)
+                }
+            }
+        }
         row.addView(prev)
         row.addView(frameLabel.apply { setPadding(24, 0, 24, 0) })
         row.addView(next)
         row.addView(addFrame)
+        row.addView(playButton)
         return row
     }
 
@@ -77,15 +108,18 @@ class LayersPanel(context: Context) : LinearLayout(context) {
             }
         }
 
-    fun refresh() {
+    private fun updateFrameLabel() {
         val frameIdx = NativeEngine.nativeGetCurrentFrameIndex()
         val frameCount = NativeEngine.nativeGetFrameCount()
         frameLabel.text = "Frame ${frameIdx + 1}/$frameCount"
+    }
+
+    /** Reconstrói rótulo de frame + lista de camadas inteira. Chamar após qualquer ação estrutural. */
+    fun refresh() {
+        updateFrameLabel()
 
         layerListContainer.removeAllViews()
         val count = NativeEngine.nativeGetLayerCount()
-        // Mostra do topo (última camada = mais acima na composição) para a base,
-        // como na maioria dos apps de desenho.
         for (i in count - 1 downTo 0) {
             layerListContainer.addView(buildLayerRow(i))
         }

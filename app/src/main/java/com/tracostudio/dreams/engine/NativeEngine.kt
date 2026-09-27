@@ -5,8 +5,6 @@ import android.view.Surface
 /**
  * Ponte fina para a engine nativa em C++ (libdreamsengine.so). Cada método aqui
  * corresponde a uma função JNI implementada em app/src/main/cpp/src/native_bridge.cpp.
- * Sem estado do lado Kotlin de propósito — todo o estado (traços, camadas, timeline,
- * contexto EGL) vive no C++ para minimizar cruzamentos JNI por frame.
  */
 object NativeEngine {
     init {
@@ -38,4 +36,9 @@ object NativeEngine {
     external fun nativeGetCurrentFrameIndex(): Int
     external fun nativeAddFrame()
     external fun nativeGoToFrame(index: Int)
+
+    // --- Playback ---
+    external fun nativePlay()
+    external fun nativePause()
+    external fun nativeIsPlaying(): Boolean
 }

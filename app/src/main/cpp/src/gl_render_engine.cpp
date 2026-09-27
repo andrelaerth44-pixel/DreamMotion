@@ -1,6 +1,5 @@
 #include "gl_render_engine.h"
 #include <android/log.h>
-#include <chrono>
 
 #define LOG_TAG "DreamsGL"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
@@ -211,9 +210,8 @@ void GLRenderEngine::removeLayer(int index) {
     std::lock_guard<std::mutex> lock(timelineMutex_);
     Frame* f = timeline_.frameAt((size_t) currentFrameIndex_);
     if (!f || index < 0 || index >= (int) f->layers.size()) return;
-    if (f->layers.size() <= 1) return; // mantém sempre ao menos 1 camada
+    if (f->layers.size() <= 1) return;
     if (activeStroke_ != nullptr && activeLayer_ == f->layers[index].get()) {
-        // Evita ponteiro pendurado se a camada ativa for removida no meio de um traço.
         activeStroke_ = nullptr;
         activeLayer_ = nullptr;
     }
@@ -260,6 +258,36 @@ void GLRenderEngine::goToFrame(int index) {
     activeLayerIndex_ = 0;
     activeStroke_ = nullptr;
     activeLayer_ = nullptr;
+}
+
+// --- Playback ---
+
+void GLRenderEngine::play() { playing_ = true; }
+void GLRenderEngine::pause() { playing_ = false; }
+bool GLRenderEngine::isPlaying() { return playing_; }
+
+void GLRenderEngine::advancePlayback(double deltaMs) {
+    if (!playing_) return;
+    frameAccumulatorMs_ += deltaMs;
+
+    std::lock_guard<std::mutex> lock(timelineMutex_);
+    int total = (int) timeline_.frameCount();
+    if (total <= 0) return;
+
+    auto holdMsFor = [&](int idx) -> double {
+        Frame* f = timeline_.frameAt((size_t) idx);
+        int ticks = f ? f->holdDurationTicks : 1;
+        if (ticks < 1) ticks = 1;
+        return ticks * 1000.0 / timeline_.framerate();
+    };
+
+    double holdMs = holdMsFor(currentFrameIndex_);
+    int guard = 0; // evita loop infinito se holdMs ficar ~0 por algum dado inválido
+    while (frameAccumulatorMs_ >= holdMs && guard++ < 1000) {
+        frameAccumulatorMs_ -= holdMs;
+        currentFrameIndex_ = (currentFrameIndex_ + 1) % total; // playback em loop
+        holdMs = holdMsFor(currentFrameIndex_);
+    }
 }
 
 // --- EGL / render loop ---
@@ -338,6 +366,7 @@ void GLRenderEngine::renderLoop() {
         return;
     }
     LOGI("Render thread nativa iniciada (%dx%d)", width_, height_);
+    lastFrameTime_ = std::chrono::steady_clock::now();
 
     while (running_) {
         std::deque<RenderCommand> batch;
@@ -393,6 +422,15 @@ void GLRenderEngine::renderLoop() {
                     break;
             }
         }
+
+        // Timing do playback: sempre atualizado, mesmo pausado, para que retomar
+        // o play não cause um salto (deltaMs nunca cresce artificialmente enquanto
+        // pausado, já que este loop continua rodando a ~60Hz de qualquer forma).
+        auto now = std::chrono::steady_clock::now();
+        double deltaMs = std::chrono::duration<double, std::milli>(now - lastFrameTime_).count();
+        lastFrameTime_ = now;
+        if (deltaMs > 250.0) deltaMs = 250.0; // amortece hiccups do sistema (ex.: app voltando do background)
+        advancePlayback(deltaMs);
 
         drawFrame();
         eglSwapBuffers(display_, surface_);

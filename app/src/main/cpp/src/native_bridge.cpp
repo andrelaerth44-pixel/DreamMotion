@@ -126,4 +126,21 @@ Java_com_tracostudio_dreams_engine_NativeEngine_nativeGoToFrame(JNIEnv*, jobject
     if (g_engine) g_engine->goToFrame(index);
 }
 
+// --- Playback ---
+
+JNIEXPORT void JNICALL
+Java_com_tracostudio_dreams_engine_NativeEngine_nativePlay(JNIEnv*, jobject) {
+    if (g_engine) g_engine->play();
+}
+
+JNIEXPORT void JNICALL
+Java_com_tracostudio_dreams_engine_NativeEngine_nativePause(JNIEnv*, jobject) {
+    if (g_engine) g_engine->pause();
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_tracostudio_dreams_engine_NativeEngine_nativeIsPlaying(JNIEnv*, jobject) {
+    return g_engine ? (jboolean) g_engine->isPlaying() : JNI_FALSE;
+}
+
 } // extern "C"
