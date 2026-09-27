@@ -34,13 +34,29 @@ void main() {
 }
 )";
 
+// Quad de composição: aUnit é o canto 0..1 do canvas (independente de resize,
+// diferente de uma versão em NDC fixo). O vértice aplica rotação+escala em
+// torno do centro do canvas e depois a translação — é isso que faz um frame
+// Interpolated mover/girar/escalar o conteúdo do keyframe de origem.
 const char* kCompositeVertexShader = R"(#version 300 es
-layout(location = 0) in vec2 aPosition;
+layout(location = 0) in vec2 aUnit;
 layout(location = 1) in vec2 aUV;
+uniform vec2 uViewportSize;
+uniform vec2 uTranslate;
+uniform float uScale;
+uniform float uRotationRad;
 out vec2 vUV;
 void main() {
     vUV = aUV;
-    gl_Position = vec4(aPosition, 0.0, 1.0);
+    vec2 pixelPos = aUnit * uViewportSize;
+    vec2 center = uViewportSize * 0.5;
+    vec2 p = pixelPos - center;
+    float c = cos(uRotationRad);
+    float s = sin(uRotationRad);
+    vec2 rotated = vec2(p.x * c - p.y * s, p.x * s + p.y * c) * uScale;
+    vec2 finalPos = rotated + center + uTranslate;
+    vec2 ndc = (finalPos / uViewportSize) * 2.0 - 1.0;
+    gl_Position = vec4(ndc.x, -ndc.y, 0.0, 1.0);
 }
 )";
 
@@ -104,6 +120,8 @@ void applyLayerBlendMode(BlendMode mode) {
         default: glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA); break;
     }
 }
+
+constexpr float kDegToRad = 0.017453292519943295f;
 
 } // namespace
 
@@ -260,6 +278,41 @@ void GLRenderEngine::goToFrame(int index) {
     activeLayer_ = nullptr;
 }
 
+// --- Keyframes / autoria de transform ---
+
+int GLRenderEngine::frameType(int index) {
+    std::lock_guard<std::mutex> lock(timelineMutex_);
+    Frame* f = timeline_.frameAt((size_t) index);
+    return f ? (int) f->type : 0;
+}
+
+void GLRenderEngine::setFrameType(int index, int type) {
+    std::lock_guard<std::mutex> lock(timelineMutex_);
+    Frame* f = timeline_.frameAt((size_t) index);
+    if (!f || type < 0 || type > 2) return;
+    f->type = (FrameType) type;
+}
+
+void GLRenderEngine::nudgeFrameTransform(int index, float dTx, float dTy, float dScale, float dRotationDeg) {
+    std::lock_guard<std::mutex> lock(timelineMutex_);
+    Frame* f = timeline_.frameAt((size_t) index);
+    if (!f) return;
+    f->transform.translateX += dTx;
+    f->transform.translateY += dTy;
+    float newScale = f->transform.scale + dScale;
+    f->transform.scale = newScale < 0.05f ? 0.05f : newScale;
+    f->transform.rotationDeg += dRotationDeg;
+}
+
+void GLRenderEngine::appendInterpolatedFrame() {
+    std::lock_guard<std::mutex> lock(timelineMutex_);
+    timeline_.appendFrame(FrameType::Interpolated);
+    currentFrameIndex_ = (int) timeline_.frameCount() - 1;
+    activeLayerIndex_ = 0;
+    activeStroke_ = nullptr;
+    activeLayer_ = nullptr;
+}
+
 // --- Playback ---
 
 void GLRenderEngine::play() { playing_ = true; }
@@ -282,10 +335,10 @@ void GLRenderEngine::advancePlayback(double deltaMs) {
     };
 
     double holdMs = holdMsFor(currentFrameIndex_);
-    int guard = 0; // evita loop infinito se holdMs ficar ~0 por algum dado inválido
+    int guard = 0;
     while (frameAccumulatorMs_ >= holdMs && guard++ < 1000) {
         frameAccumulatorMs_ -= holdMs;
-        currentFrameIndex_ = (currentFrameIndex_ + 1) % total; // playback em loop
+        currentFrameIndex_ = (currentFrameIndex_ + 1) % total;
         holdMs = holdMsFor(currentFrameIndex_);
     }
 }
@@ -327,11 +380,13 @@ bool GLRenderEngine::initEGL(ANativeWindow* window) {
     strokeProgram_ = linkProgram(kStrokeVertexShader, kStrokeFragmentShader);
     compositeProgram_ = linkProgram(kCompositeVertexShader, kCompositeFragmentShader);
 
+    // Cantos unitários (0..1) do canvas, não NDC fixo — o vértice multiplica por
+    // uViewportSize, então este VBO não precisa ser regerado em resize.
     float quad[] = {
-        -1, -1,  0, 1,
-         1, -1,  1, 1,
-        -1,  1,  0, 0,
-         1,  1,  1, 0,
+        0, 0,  0, 1,
+        1, 0,  1, 1,
+        0, 1,  0, 0,
+        1, 1,  1, 0,
     };
     glGenBuffers(1, &fullscreenQuadVbo_);
     glBindBuffer(GL_ARRAY_BUFFER, fullscreenQuadVbo_);
@@ -423,13 +478,10 @@ void GLRenderEngine::renderLoop() {
             }
         }
 
-        // Timing do playback: sempre atualizado, mesmo pausado, para que retomar
-        // o play não cause um salto (deltaMs nunca cresce artificialmente enquanto
-        // pausado, já que este loop continua rodando a ~60Hz de qualquer forma).
         auto now = std::chrono::steady_clock::now();
         double deltaMs = std::chrono::duration<double, std::milli>(now - lastFrameTime_).count();
         lastFrameTime_ = now;
-        if (deltaMs > 250.0) deltaMs = 250.0; // amortece hiccups do sistema (ex.: app voltando do background)
+        if (deltaMs > 250.0) deltaMs = 250.0;
         advancePlayback(deltaMs);
 
         drawFrame();
@@ -551,14 +603,19 @@ void GLRenderEngine::renderLayerContents(Layer& layer) {
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
-void GLRenderEngine::compositeLayer(const Layer& layer) {
+void GLRenderEngine::compositeLayer(const Layer& layer, const Transform& transform) {
     glUseProgram(compositeProgram_);
     applyLayerBlendMode(layer.blendMode);
+
+    glUniform2f(glGetUniformLocation(compositeProgram_, "uViewportSize"), (float) width_, (float) height_);
+    glUniform2f(glGetUniformLocation(compositeProgram_, "uTranslate"), transform.translateX, transform.translateY);
+    glUniform1f(glGetUniformLocation(compositeProgram_, "uScale"), transform.scale);
+    glUniform1f(glGetUniformLocation(compositeProgram_, "uRotationRad"), transform.rotationDeg * kDegToRad);
 
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, (GLuint) layer.textureHandle);
     glUniform1i(glGetUniformLocation(compositeProgram_, "uTexture"), 0);
-    glUniform1f(glGetUniformLocation(compositeProgram_, "uOpacity"), layer.opacity);
+    glUniform1f(glGetUniformLocation(compositeProgram_, "uOpacity"), layer.opacity * transform.opacity);
 
     glBindBuffer(GL_ARRAY_BUFFER, fullscreenQuadVbo_);
     glEnableVertexAttribArray(0);
@@ -575,10 +632,17 @@ void GLRenderEngine::drawFrame() {
     glClear(GL_COLOR_BUFFER_BIT);
 
     std::lock_guard<std::mutex> lock(timelineMutex_);
-    Frame* frame = timeline_.frameAt((size_t) currentFrameIndex_);
-    if (!frame) return;
+    if (currentFrameIndex_ < 0 || currentFrameIndex_ >= (int) timeline_.frameCount()) return;
 
-    for (auto& layerPtr : frame->layers) {
+    // Fonte do conteúdo (camadas): para um frame Interpolated, vem do keyframe/
+    // frame desenhado mais próximo. O Transform aplicado no compositing, por
+    // outro lado, é sempre resolvido para o índice pedido — é essa combinação
+    // que faz o conteúdo do keyframe "se mover" nos frames interpolados.
+    Frame* renderFrame = timeline_.contentSourceFrame((size_t) currentFrameIndex_);
+    Transform transform = timeline_.resolveTransformForFrameIndex((size_t) currentFrameIndex_);
+    if (!renderFrame) return;
+
+    for (auto& layerPtr : renderFrame->layers) {
         Layer& layer = *layerPtr;
         if (!layer.visible) continue;
         ensureLayerTarget(layer);
@@ -588,7 +652,7 @@ void GLRenderEngine::drawFrame() {
         }
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
         glViewport(0, 0, width_, height_);
-        compositeLayer(layer);
+        compositeLayer(layer, transform);
     }
 
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);

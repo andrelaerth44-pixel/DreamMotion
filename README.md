@@ -1,67 +1,64 @@
 # Traço Dreams (DreamMotion)
 
 Versão Android inspirada no Procreate Dreams: desenho em camadas + timeline de animação
-com keyframes interpolados. Este commit é um **esqueleto funcional em evolução**, não
-o app completo — mas já compila, desenha, composita camadas, navega frames e reproduz
-a timeline.
+com keyframes interpolados de verdade. Este commit é um **esqueleto funcional em
+evolução**, não o app completo — mas já compila, desenha, composita camadas, navega
+frames, reproduz a timeline e interpola transform entre keyframes.
 
 ## Arquitetura
 
-- **Engine em C++** (`app/src/main/cpp`): dona de todo o estado de desenho (traços, camadas,
-  frames, timeline) e da renderização OpenGL ES 3. Roda em uma **thread de render nativa
-  dedicada**, com seu próprio contexto EGL — não usa `GLSurfaceView`. Essa mesma thread
-  agora também cuida do playback (avançar frames automaticamente).
+- **Engine em C++** (`app/src/main/cpp`): dona de todo o estado de desenho (traços,
+  camadas, frames, timeline) e da renderização OpenGL ES 3. Roda em uma thread de
+  render nativa dedicada, com seu próprio contexto EGL.
 - **Ponte JNI** (`native_bridge.cpp` + `NativeEngine.kt`): toque, ciclo de vida da
-  `Surface`, consultas/comandos de estrutura (camadas e frames) e controle de playback.
-- **UI Android**: `DreamsSurfaceView` (canvas cru) + `LayersPanel` (painel utilitário
-  de camadas/timeline/playback, Views programáticas sem estilo ainda).
+  `Surface`, estrutura (camadas/frames), autoria de keyframes e playback.
+- **UI Android**: `DreamsSurfaceView` (canvas cru) + `LayersPanel` (painel utilitário,
+  Views programáticas sem estilo ainda).
 
 ## O que já funciona
 
 - Compila um app Android com módulo nativo (CMake + NDK).
 - Desenho com pincel: carimbo circular com borda suave, reagindo à pressão.
-- Compositing por camada via FBO, com blend modes reais (Normal/Multiply/Screen/Add)
-  e borracha como blend mode próprio.
-- VBO persistente para geometria de traço (um upload + um draw call por traço inteiro).
-- Painel de camadas: adicionar, remover, reordenar, mostrar/ocultar, escolher a
-  camada ativa.
-- Navegação de frames: adicionar frame, ir para o anterior/próximo — cada frame
-  tem seu próprio conjunto de camadas.
-- **Playback**: botão Play/Pause reproduz a timeline em loop, respeitando o
-  `holdDurationTicks` de cada frame e o framerate do projeto (24fps por padrão) —
-  quem avança os frames é a própria render thread nativa (`advancePlayback`),
-  não um timer do lado Kotlin.
-- Estrutura de dados de `Timeline`/`Frame` já suporta keyframes e frames interpolados,
-  com `resolveTransformAtTick` fazendo lerp de `Transform` (ainda não usado no playback
-  visual — hoje o playback troca de frame inteiro, não interpola transforms).
+- Compositing por camada via FBO, com blend modes reais e VBO persistente de traço.
+- Painel de camadas (add/remover/reordenar/visibilidade) e navegação de frames.
+- Playback em loop, respeitando `holdDurationTicks`/framerate, avançado pela
+  própria render thread nativa.
+- **Interpolação de keyframes de verdade**: marque um frame como Keyframe, crie
+  um frame Interpolated entre dois keyframes, ajuste a pose (posição/escala/
+  rotação/opacidade) de cada keyframe com os botões de nudge do painel — no
+  playback, o frame interpolado mostra o desenho do keyframe anterior sendo
+  transformado (via shader) em direção à pose do próximo keyframe, com a fração
+  real calculada pela posição entre os dois índices de keyframe (não mais um
+  placeholder fixo).
+
+### Limitação honesta da interpolação atual
+
+Não existe (ainda) o conceito de "uma única arte compartilhada entre keyframes"
+— cada Frame tem suas próprias camadas. Para um frame Interpolated, o conteúdo
+vem do keyframe/frame desenhado **anterior mais próximo** (`Timeline::content-
+SourceFrame`), transformado. Isso já produz o efeito visual certo (o desenho se
+move/escala/gira), mas se você desenhar algo diferente no segundo keyframe, o
+playback interpolado não faz cross-fade entre os dois desenhos — ele só
+transforma o primeiro. Resolver isso de verdade pede um objeto de arte
+compartilhado entre keyframes (ou um cross-fade explícito), documentado aqui
+como próximo passo.
 
 ## O que ainda é esqueleto / próximos passos
 
-- **Interpolação real no playback**: hoje `FrameType::Keyframe`/`Interpolated` existem
-  na estrutura de dados mas o playback atual só alterna entre frames `Drawn` inteiros;
-  falta ligar `resolveTransformAtTick` ao desenho de fato.
-- **Desenhar durante o playback não é bloqueado** — um toque no canvas enquanto toca
-  adiciona um traço ao frame que estiver passando naquele instante. Bloquear input
-  durante o play (ou pausar automaticamente ao tocar) é um próximo passo óbvio.
-- **Fração real de interpolação**: `Timeline::resolveTransformAtTick` usa `t = 0.5f`
-  fixo como placeholder.
-- **Onion skinning**, seletor de pincel/cor, undo/redo, exportação (vídeo/GIF/PNG
-  sequence), formato de arquivo de projeto (salvar/carregar).
-- **Estilo visual do painel**: hoje é puramente funcional (Views cruas).
-- **Multi-toque / zoom e pan do canvas**: não implementados ainda.
+- Cross-fade real entre a arte de dois keyframes diferentes (ver limitação acima).
+- Desenhar durante o playback não é bloqueado.
+- Onion skinning, seletor de pincel/cor, undo/redo, exportação, salvar/carregar projeto.
+- Estilo visual do painel (hoje Views cruas).
+- Multi-toque / zoom e pan do canvas.
 
 ## Concorrência
 
-A engine é acessada por duas threads: a de render (dona do contexto EGL, do
-playback e do desenho) e a UI thread (via os métodos de camadas/frames/playback
-chamados pelo `LayersPanel`). Toda estrutura compartilhada (`Timeline`,
-`currentFrameIndex_`, `activeLayerIndex_`) está protegida por um `std::mutex`
-(`timelineMutex_`); o flag `playing_` é um `std::atomic<bool>` por ser um caso
-mais simples (leitura/escrita de um booleano isolado).
+Toda estrutura compartilhada (`Timeline`, `currentFrameIndex_`, `activeLayerIndex_`)
+está protegida por `timelineMutex_`; `playing_` é um `std::atomic<bool>`.
 
 ## Build
 
-- Android Studio Koala+ com NDK 26.3.11579264 e CMake 3.22.1 instalados via SDK Manager.
-- `minSdk 26` (OpenGL ES 3 garantido), `compileSdk`/`targetSdk 34`.
-- Abrir a raiz do repo no Android Studio e rodar — o Gradle já aponta para
+- Android Studio Koala+ com NDK 26.3.11579264 e CMake 3.22.1.
+- `minSdk 26`, `compileSdk`/`targetSdk 34`.
+- Abrir a raiz do repo no Android Studio e rodar — o Gradle aponta para
   `app/src/main/cpp/CMakeLists.txt` via `externalNativeBuild`.

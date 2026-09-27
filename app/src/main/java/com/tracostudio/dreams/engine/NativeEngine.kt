@@ -37,6 +37,12 @@ object NativeEngine {
     external fun nativeAddFrame()
     external fun nativeGoToFrame(index: Int)
 
+    // --- Keyframes / autoria de transform. Tipos: 0=Drawn, 1=Keyframe, 2=Interpolated ---
+    external fun nativeGetFrameType(index: Int): Int
+    external fun nativeSetFrameType(index: Int, type: Int)
+    external fun nativeNudgeFrameTransform(index: Int, dTx: Float, dTy: Float, dScale: Float, dRotationDeg: Float)
+    external fun nativeAppendInterpolatedFrame()
+
     // --- Playback ---
     external fun nativePlay()
     external fun nativePause()

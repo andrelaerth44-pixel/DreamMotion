@@ -126,6 +126,29 @@ Java_com_tracostudio_dreams_engine_NativeEngine_nativeGoToFrame(JNIEnv*, jobject
     if (g_engine) g_engine->goToFrame(index);
 }
 
+// --- Keyframes / autoria de transform ---
+
+JNIEXPORT jint JNICALL
+Java_com_tracostudio_dreams_engine_NativeEngine_nativeGetFrameType(JNIEnv*, jobject, jint index) {
+    return g_engine ? g_engine->frameType(index) : 0;
+}
+
+JNIEXPORT void JNICALL
+Java_com_tracostudio_dreams_engine_NativeEngine_nativeSetFrameType(JNIEnv*, jobject, jint index, jint type) {
+    if (g_engine) g_engine->setFrameType(index, type);
+}
+
+JNIEXPORT void JNICALL
+Java_com_tracostudio_dreams_engine_NativeEngine_nativeNudgeFrameTransform(
+        JNIEnv*, jobject, jint index, jfloat dTx, jfloat dTy, jfloat dScale, jfloat dRotationDeg) {
+    if (g_engine) g_engine->nudgeFrameTransform(index, dTx, dTy, dScale, dRotationDeg);
+}
+
+JNIEXPORT void JNICALL
+Java_com_tracostudio_dreams_engine_NativeEngine_nativeAppendInterpolatedFrame(JNIEnv*, jobject) {
+    if (g_engine) g_engine->appendInterpolatedFrame();
+}
+
 // --- Playback ---
 
 JNIEXPORT void JNICALL

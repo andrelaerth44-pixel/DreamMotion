@@ -22,9 +22,6 @@ public:
     std::vector<std::unique_ptr<Layer>> layers;
 };
 
-// Gerencia a sequência de frames e resolve, para um tick global, qual transform
-// aplicar — incluindo a interpolação entre KEYFRAMEs consecutivos, que é o que
-// diferencia uma timeline "Procreate Dreams" de um flipbook simples (FlipaClip).
 class Timeline {
 public:
     explicit Timeline(int framerate = 24) : framerate_(framerate) {
@@ -42,7 +39,25 @@ public:
         return frames_.back().get();
     }
 
+    // Versão baseada em tempo contínuo (ticks acumulados via holdDurationTicks).
+    // Mantida para um futuro modelo de playback contínuo; o playback atual
+    // (GLRenderEngine::advancePlayback) trabalha diretamente em índice de frame
+    // e usa resolveTransformForFrameIndex abaixo, mais direto para esse caso.
     Transform resolveTransformAtTick(int64_t tick) const;
+
+    // Resolve o Transform efetivo para um índice de frame específico, interpolando
+    // entre o KEYFRAME anterior e o próximo quando o frame é do tipo Interpolated.
+    // A fração t é a posição relativa real entre os dois índices de keyframe —
+    // substitui o antigo placeholder fixo (t = 0.5).
+    Transform resolveTransformForFrameIndex(size_t frameIndex) const;
+
+    // Encontra o frame que efetivamente contém o desenho (camadas) a usar para
+    // renderizar o índice pedido: se o frame for Interpolated, caminha para trás
+    // até o frame desenhado/keyframe mais próximo. SIMPLIFICAÇÃO DESTA ITERAÇÃO:
+    // não existe (ainda) um conceito real de "mesma arte compartilhada entre
+    // keyframes" — o conteúdo vem sempre do keyframe anterior mais próximo, e não
+    // de um objeto de desenho único referenciado por vários keyframes.
+    Frame* contentSourceFrame(size_t frameIndex) const;
 
 private:
     int framerate_;

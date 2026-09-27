@@ -13,25 +13,24 @@ import android.widget.TextView
 import com.tracostudio.dreams.engine.NativeEngine
 
 /**
- * Painel utilitário que expõe as camadas, a navegação de frames e o playback da
- * timeline que já funcionam na engine nativa. Deliberadamente cru (Views
- * programáticas, sem estilo) — o objetivo aqui é expor a funcionalidade que a
- * engine já tem, não desenhar a UI final do produto.
+ * Painel utilitário que expõe camadas, navegação/playback de timeline, e agora
+ * também a autoria básica de keyframes (marcar um frame como Keyframe e ajustar
+ * seu Transform com botões de nudge). Deliberadamente cru (Views programáticas).
  *
- * Durante o playback, quem avança os frames é a própria render thread nativa
- * (ver GLRenderEngine::advancePlayback) — este painel só faz polling leve
- * (a cada 100ms) pra manter o rótulo "Frame X/Y" sincronizado enquanto toca.
- *
- * NOTA: desenhar enquanto o playback está ativo não é bloqueado hoje — um
- * toque durante o play adiciona um traço a qualquer frame que estiver passando
- * naquele instante. Isso é um comportamento a refinar (ex.: pausar
- * automaticamente ao detectar um toque no canvas).
+ * Fluxo para testar interpolação de verdade:
+ * 1. Desenhe algo no frame 1, toque "Marcar Keyframe".
+ * 2. Toque "+ Interpolado" (cria um frame vazio do tipo Interpolated).
+ * 3. Toque "+ Frame", desenhe... na verdade o próximo Keyframe precisa ser
+ *    marcado manualmente após criado — crie um frame, toque "Marcar Keyframe"
+ *    de novo, e ajuste a posição/escala/rotação dele com os botões de nudge.
+ * 4. Dê Play: o frame Interpolated no meio vai mostrar o desenho do primeiro
+ *    keyframe se movendo/escalando/girando em direção à pose do segundo.
  */
 class LayersPanel(context: Context) : LinearLayout(context) {
 
     private val frameLabel = TextView(context)
+    private val keyframeToggleButton = Button(context)
     private val layerListContainer = LinearLayout(context).apply { orientation = VERTICAL }
-    private val playButton = Button(context)
 
     private val handler = Handler(Looper.getMainLooper())
     private val playbackTick = object : Runnable {
@@ -47,6 +46,7 @@ class LayersPanel(context: Context) : LinearLayout(context) {
         setPadding(16, 16, 16, 16)
 
         addView(buildFrameRow())
+        addView(buildKeyframeRow())
         addView(layerListContainer)
         addView(buildAddLayerButton())
 
@@ -76,14 +76,14 @@ class LayersPanel(context: Context) : LinearLayout(context) {
             text = "+ Frame"
             setOnClickListener { NativeEngine.nativeAddFrame(); refresh() }
         }
-        playButton.apply {
+        val playButton = Button(context).apply {
             text = "▶ Play"
             setOnClickListener {
                 if (NativeEngine.nativeIsPlaying()) {
                     NativeEngine.nativePause()
                     text = "▶ Play"
                     handler.removeCallbacks(playbackTick)
-                    refresh() // playback pode ter mudado a camada/frame corrente
+                    refresh()
                 } else {
                     NativeEngine.nativePlay()
                     text = "⏸ Pause"
@@ -99,6 +99,42 @@ class LayersPanel(context: Context) : LinearLayout(context) {
         return row
     }
 
+    private fun buildKeyframeRow(): View {
+        val row = LinearLayout(context).apply {
+            orientation = HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        keyframeToggleButton.setOnClickListener {
+            val idx = NativeEngine.nativeGetCurrentFrameIndex()
+            val isKey = NativeEngine.nativeGetFrameType(idx) == 1
+            NativeEngine.nativeSetFrameType(idx, if (isKey) 0 else 1)
+            refresh()
+        }
+        val left = Button(context).apply { text = "◄"; setOnClickListener { nudge(-20f, 0f, 0f, 0f) } }
+        val right = Button(context).apply { text = "►"; setOnClickListener { nudge(20f, 0f, 0f, 0f) } }
+        val up = Button(context).apply { text = "▲"; setOnClickListener { nudge(0f, -20f, 0f, 0f) } }
+        val down = Button(context).apply { text = "▼"; setOnClickListener { nudge(0f, 20f, 0f, 0f) } }
+        val scaleDown = Button(context).apply { text = "−"; setOnClickListener { nudge(0f, 0f, -0.1f, 0f) } }
+        val scaleUp = Button(context).apply { text = "+"; setOnClickListener { nudge(0f, 0f, 0.1f, 0f) } }
+        val rotCcw = Button(context).apply { text = "↺"; setOnClickListener { nudge(0f, 0f, 0f, -10f) } }
+        val rotCw = Button(context).apply { text = "↻"; setOnClickListener { nudge(0f, 0f, 0f, 10f) } }
+        val addInterpolated = Button(context).apply {
+            text = "+ Interpolado"
+            setOnClickListener { NativeEngine.nativeAppendInterpolatedFrame(); refresh() }
+        }
+        row.addView(keyframeToggleButton)
+        row.addView(left); row.addView(right); row.addView(up); row.addView(down)
+        row.addView(scaleDown); row.addView(scaleUp)
+        row.addView(rotCcw); row.addView(rotCw)
+        row.addView(addInterpolated)
+        return row
+    }
+
+    private fun nudge(dTx: Float, dTy: Float, dScale: Float, dRot: Float) {
+        val idx = NativeEngine.nativeGetCurrentFrameIndex()
+        NativeEngine.nativeNudgeFrameTransform(idx, dTx, dTy, dScale, dRot)
+    }
+
     private fun buildAddLayerButton(): View =
         Button(context).apply {
             text = "+ Camada"
@@ -112,9 +148,14 @@ class LayersPanel(context: Context) : LinearLayout(context) {
         val frameIdx = NativeEngine.nativeGetCurrentFrameIndex()
         val frameCount = NativeEngine.nativeGetFrameCount()
         frameLabel.text = "Frame ${frameIdx + 1}/$frameCount"
+
+        keyframeToggleButton.text = when (NativeEngine.nativeGetFrameType(frameIdx)) {
+            1 -> "★ Keyframe"
+            2 -> "◈ Interpolado"
+            else -> "☆ Marcar Keyframe"
+        }
     }
 
-    /** Reconstrói rótulo de frame + lista de camadas inteira. Chamar após qualquer ação estrutural. */
     fun refresh() {
         updateFrameLabel()
 

@@ -20,12 +20,12 @@ struct RenderCommand {
     float width = 0, height = 0;
 };
 
-// Motor de renderização OpenGL ES 3 com thread de render dedicada, compositing
-// por camada via FBO, VBO persistente de traços, e API de estrutura (camadas +
-// frames) protegida por timelineMutex_. Esta revisão adiciona playback: quando
-// playing_ está ativo, a própria render thread avança currentFrameIndex_ no
-// ritmo do framerate/holdDurationTicks de cada Frame, sem depender de nenhum
-// timer do lado Kotlin.
+// Motor de renderização OpenGL ES 3. Ver revisões anteriores para compositing por
+// FBO, VBO persistente de traços e playback automático. Esta revisão liga a
+// interpolação de keyframes (Timeline::resolveTransformForFrameIndex) ao
+// compositing de verdade: frames Interpolated agora reaproveitam o conteúdo do
+// keyframe anterior (Timeline::contentSourceFrame) e o compositeLayer aplica um
+// Transform (translate/scale/rotação/opacidade) real via shader.
 class GLRenderEngine {
 public:
     GLRenderEngine();
@@ -57,6 +57,12 @@ public:
     void addFrame();
     void goToFrame(int index);
 
+    // --- Keyframes / autoria de transform ---
+    int frameType(int index);              // 0=Drawn, 1=Keyframe, 2=Interpolated
+    void setFrameType(int index, int type);
+    void nudgeFrameTransform(int index, float dTx, float dTy, float dScale, float dRotationDeg);
+    void appendInterpolatedFrame();        // adiciona um frame Interpolated ao final
+
     // --- Playback ---
     void play();
     void pause();
@@ -66,12 +72,12 @@ private:
     void renderLoop();
     bool initEGL(ANativeWindow* window);
     void destroyEGL();
-    void advancePlayback(double deltaMs); // chamada pela render thread a cada iteração
+    void advancePlayback(double deltaMs);
 
     void drawFrame();
     void ensureLayerTarget(Layer& layer);
     void renderLayerContents(Layer& layer);
-    void compositeLayer(const Layer& layer);
+    void compositeLayer(const Layer& layer, const Transform& transform);
 
     void ensureStrokeVboCapacity(size_t requiredBytes);
     static void appendStrokeQuadVertices(std::vector<float>& out, const Stroke& stroke);
@@ -95,8 +101,6 @@ private:
     int currentFrameIndex_ = 0;
     int activeLayerIndex_ = 0;
 
-    // Playback: só tocado pela render thread, exceto playing_ (atomic, lido/
-    // escrito também pela UI thread via play()/pause()/isPlaying()).
     std::atomic<bool> playing_{false};
     std::chrono::steady_clock::time_point lastFrameTime_{};
     double frameAccumulatorMs_ = 0.0;
