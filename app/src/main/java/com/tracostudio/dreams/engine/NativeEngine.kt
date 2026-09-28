@@ -19,12 +19,6 @@ object NativeEngine {
     external fun nativeTouchMove(x: Float, y: Float, pressure: Float)
     external fun nativeTouchUp()
 
-    // --- Câmera de navegação do canvas ---
-    external fun nativePanCamera(dx: Float, dy: Float)
-    external fun nativeZoomCamera(factor: Float, pivotX: Float, pivotY: Float)
-    external fun nativeRotateCamera(deltaDeg: Float)
-    external fun nativeResetCamera()
-
     // --- Pincel atual ---
     external fun nativeSetBrushColor(argb: Int)
     external fun nativeSetBrushSize(px: Float)
@@ -37,6 +31,25 @@ object NativeEngine {
     external fun nativeRedo()
     external fun nativeCanUndo(): Boolean
     external fun nativeCanRedo(): Boolean
+
+    // --- Câmera. Aspect: 0=canvas, 1=16:9, 2=4:3, 3=1:1, 4=9:16.
+    //     Easing: 0=linear, 1=ease in, 2=ease out, 3=ease in-out.
+    //     Reset: 0=tudo, 1=posição, 2=zoom, 3=rotação. ---
+    external fun nativeSetCameraViewMode(enabled: Boolean)
+    external fun nativeIsCameraViewMode(): Boolean
+    external fun nativeSetCameraAspectPreset(preset: Int)
+    external fun nativeGetCameraAspectPreset(): Int
+    external fun nativeSetCameraPathVisible(visible: Boolean)
+    external fun nativeSetCameraKey()
+    external fun nativeRemoveCameraKey()
+    external fun nativeHasCameraKey(): Boolean
+    external fun nativeGetCameraKeyCount(): Int
+    external fun nativeNudgeCamera(dx: Float, dy: Float, zoomMultiplier: Float, dRotationDeg: Float)
+    external fun nativeResetCamera(what: Int)
+    external fun nativeSetCameraEasing(easing: Int)
+    external fun nativeGetCameraEasing(): Int
+    external fun nativeSetCameraHold(hold: Boolean)
+    external fun nativeGetCameraHold(): Boolean
 
     // --- Camadas do frame corrente ---
     external fun nativeGetLayerCount(): Int
@@ -56,7 +69,7 @@ object NativeEngine {
     external fun nativeAddFrame()
     external fun nativeGoToFrame(index: Int)
 
-    // --- Keyframes / autoria de transform. Tipos: 0=Drawn, 1=Keyframe, 2=Interpolated ---
+    // --- Keyframes de objeto. Tipos: 0=Drawn, 1=Keyframe, 2=Interpolated ---
     external fun nativeGetFrameType(index: Int): Int
     external fun nativeSetFrameType(index: Int, type: Int)
     external fun nativeNudgeFrameTransform(index: Int, dTx: Float, dTy: Float, dScale: Float, dRotationDeg: Float)
@@ -66,8 +79,4 @@ object NativeEngine {
     external fun nativePlay()
     external fun nativePause()
     external fun nativeIsPlaying(): Boolean
-
-    // --- Projeto (salvar/carregar) ---
-    external fun nativeSaveProject(path: String): Boolean
-    external fun nativeLoadProject(path: String): Boolean
 }

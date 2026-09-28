@@ -48,29 +48,6 @@ Java_com_tracostudio_dreams_engine_NativeEngine_nativeTouchUp(
     if (g_engine) g_engine->onTouchUp();
 }
 
-// --- Câmera ---
-
-JNIEXPORT void JNICALL
-Java_com_tracostudio_dreams_engine_NativeEngine_nativePanCamera(JNIEnv*, jobject, jfloat dx, jfloat dy) {
-    if (g_engine) g_engine->panCamera(dx, dy);
-}
-
-JNIEXPORT void JNICALL
-Java_com_tracostudio_dreams_engine_NativeEngine_nativeZoomCamera(
-        JNIEnv*, jobject, jfloat factor, jfloat pivotX, jfloat pivotY) {
-    if (g_engine) g_engine->zoomCamera(factor, pivotX, pivotY);
-}
-
-JNIEXPORT void JNICALL
-Java_com_tracostudio_dreams_engine_NativeEngine_nativeRotateCamera(JNIEnv*, jobject, jfloat deltaDeg) {
-    if (g_engine) g_engine->rotateCamera(deltaDeg);
-}
-
-JNIEXPORT void JNICALL
-Java_com_tracostudio_dreams_engine_NativeEngine_nativeResetCamera(JNIEnv*, jobject) {
-    if (g_engine) g_engine->resetCamera();
-}
-
 // --- Pincel atual ---
 
 JNIEXPORT void JNICALL
@@ -118,6 +95,84 @@ Java_com_tracostudio_dreams_engine_NativeEngine_nativeCanUndo(JNIEnv*, jobject) 
 JNIEXPORT jboolean JNICALL
 Java_com_tracostudio_dreams_engine_NativeEngine_nativeCanRedo(JNIEnv*, jobject) {
     return g_engine ? (jboolean) g_engine->canRedo() : JNI_FALSE;
+}
+
+// --- Câmera ---
+
+JNIEXPORT void JNICALL
+Java_com_tracostudio_dreams_engine_NativeEngine_nativeSetCameraViewMode(JNIEnv*, jobject, jboolean enabled) {
+    if (g_engine) g_engine->setCameraViewMode(enabled == JNI_TRUE);
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_tracostudio_dreams_engine_NativeEngine_nativeIsCameraViewMode(JNIEnv*, jobject) {
+    return g_engine ? (jboolean) g_engine->isCameraViewMode() : JNI_FALSE;
+}
+
+JNIEXPORT void JNICALL
+Java_com_tracostudio_dreams_engine_NativeEngine_nativeSetCameraAspectPreset(JNIEnv*, jobject, jint preset) {
+    if (g_engine) g_engine->setCameraAspectPreset(preset);
+}
+
+JNIEXPORT jint JNICALL
+Java_com_tracostudio_dreams_engine_NativeEngine_nativeGetCameraAspectPreset(JNIEnv*, jobject) {
+    return g_engine ? g_engine->cameraAspectPreset() : 0;
+}
+
+JNIEXPORT void JNICALL
+Java_com_tracostudio_dreams_engine_NativeEngine_nativeSetCameraPathVisible(JNIEnv*, jobject, jboolean visible) {
+    if (g_engine) g_engine->setCameraPathVisible(visible == JNI_TRUE);
+}
+
+JNIEXPORT void JNICALL
+Java_com_tracostudio_dreams_engine_NativeEngine_nativeSetCameraKey(JNIEnv*, jobject) {
+    if (g_engine) g_engine->setCameraKeyAtCurrentFrame();
+}
+
+JNIEXPORT void JNICALL
+Java_com_tracostudio_dreams_engine_NativeEngine_nativeRemoveCameraKey(JNIEnv*, jobject) {
+    if (g_engine) g_engine->removeCameraKeyAtCurrentFrame();
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_tracostudio_dreams_engine_NativeEngine_nativeHasCameraKey(JNIEnv*, jobject) {
+    return g_engine ? (jboolean) g_engine->hasCameraKeyAtCurrentFrame() : JNI_FALSE;
+}
+
+JNIEXPORT jint JNICALL
+Java_com_tracostudio_dreams_engine_NativeEngine_nativeGetCameraKeyCount(JNIEnv*, jobject) {
+    return g_engine ? g_engine->cameraKeyCount() : 0;
+}
+
+JNIEXPORT void JNICALL
+Java_com_tracostudio_dreams_engine_NativeEngine_nativeNudgeCamera(
+        JNIEnv*, jobject, jfloat dx, jfloat dy, jfloat zoomMultiplier, jfloat dRotationDeg) {
+    if (g_engine) g_engine->nudgeCamera(dx, dy, zoomMultiplier, dRotationDeg);
+}
+
+JNIEXPORT void JNICALL
+Java_com_tracostudio_dreams_engine_NativeEngine_nativeResetCamera(JNIEnv*, jobject, jint what) {
+    if (g_engine) g_engine->resetCamera(what);
+}
+
+JNIEXPORT void JNICALL
+Java_com_tracostudio_dreams_engine_NativeEngine_nativeSetCameraEasing(JNIEnv*, jobject, jint easing) {
+    if (g_engine) g_engine->setCameraEasing(easing);
+}
+
+JNIEXPORT jint JNICALL
+Java_com_tracostudio_dreams_engine_NativeEngine_nativeGetCameraEasing(JNIEnv*, jobject) {
+    return g_engine ? g_engine->cameraEasing() : 3;
+}
+
+JNIEXPORT void JNICALL
+Java_com_tracostudio_dreams_engine_NativeEngine_nativeSetCameraHold(JNIEnv*, jobject, jboolean hold) {
+    if (g_engine) g_engine->setCameraHold(hold == JNI_TRUE);
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_tracostudio_dreams_engine_NativeEngine_nativeGetCameraHold(JNIEnv*, jobject) {
+    return g_engine ? (jboolean) g_engine->cameraHold() : JNI_FALSE;
 }
 
 // --- Camadas ---
@@ -198,7 +253,7 @@ Java_com_tracostudio_dreams_engine_NativeEngine_nativeGoToFrame(JNIEnv*, jobject
     if (g_engine) g_engine->goToFrame(index);
 }
 
-// --- Keyframes / autoria de transform ---
+// --- Keyframes de objeto / autoria de transform ---
 
 JNIEXPORT jint JNICALL
 Java_com_tracostudio_dreams_engine_NativeEngine_nativeGetFrameType(JNIEnv*, jobject, jint index) {
@@ -236,26 +291,6 @@ Java_com_tracostudio_dreams_engine_NativeEngine_nativePause(JNIEnv*, jobject) {
 JNIEXPORT jboolean JNICALL
 Java_com_tracostudio_dreams_engine_NativeEngine_nativeIsPlaying(JNIEnv*, jobject) {
     return g_engine ? (jboolean) g_engine->isPlaying() : JNI_FALSE;
-}
-
-// --- Projeto ---
-
-JNIEXPORT jboolean JNICALL
-Java_com_tracostudio_dreams_engine_NativeEngine_nativeSaveProject(JNIEnv* env, jobject, jstring path) {
-    if (!g_engine) return JNI_FALSE;
-    const char* chars = env->GetStringUTFChars(path, nullptr);
-    bool ok = g_engine->saveProject(chars ? chars : "");
-    if (chars) env->ReleaseStringUTFChars(path, chars);
-    return (jboolean) ok;
-}
-
-JNIEXPORT jboolean JNICALL
-Java_com_tracostudio_dreams_engine_NativeEngine_nativeLoadProject(JNIEnv* env, jobject, jstring path) {
-    if (!g_engine) return JNI_FALSE;
-    const char* chars = env->GetStringUTFChars(path, nullptr);
-    bool ok = g_engine->loadProject(chars ? chars : "");
-    if (chars) env->ReleaseStringUTFChars(path, chars);
-    return (jboolean) ok;
 }
 
 } // extern "C"

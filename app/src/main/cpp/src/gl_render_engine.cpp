@@ -1,7 +1,7 @@
 #include "gl_render_engine.h"
-#include "project_io.h"
 #include <android/log.h>
 #include <cmath>
+#include <algorithm>
 
 #define LOG_TAG "DreamsGL"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
@@ -36,35 +36,25 @@ void main() {
 }
 )";
 
-// Duas etapas de transformação, ambas em torno do centro do canvas: primeiro o
-// Transform de animação do keyframe (uFrame*), depois a câmera de navegação do
-// usuário (uCam*) — independentes uma da outra por design.
+// Usado tanto para compor camadas na cena quanto para apresentar a cena na tela:
+// rotação+escala em torno do centro da viewport, depois translação.
 const char* kCompositeVertexShader = R"(#version 300 es
 layout(location = 0) in vec2 aUnit;
 layout(location = 1) in vec2 aUV;
 uniform vec2 uViewportSize;
-uniform vec2 uFrameTranslate;
-uniform float uFrameScale;
-uniform float uFrameRotationRad;
-uniform vec2 uCamTranslate;
-uniform float uCamZoom;
-uniform float uCamRotationRad;
+uniform vec2 uTranslate;
+uniform float uScale;
+uniform float uRotationRad;
 out vec2 vUV;
 void main() {
     vUV = aUV;
     vec2 pixelPos = aUnit * uViewportSize;
     vec2 center = uViewportSize * 0.5;
-
     vec2 p = pixelPos - center;
-    float fc = cos(uFrameRotationRad);
-    float fs = sin(uFrameRotationRad);
-    vec2 afterFrame = vec2(p.x * fc - p.y * fs, p.x * fs + p.y * fc) * uFrameScale + center + uFrameTranslate;
-
-    vec2 p2 = afterFrame - center;
-    float cc = cos(uCamRotationRad);
-    float cs = sin(uCamRotationRad);
-    vec2 finalPos = vec2(p2.x * cc - p2.y * cs, p2.x * cs + p2.y * cc) * uCamZoom + center + uCamTranslate;
-
+    float c = cos(uRotationRad);
+    float s = sin(uRotationRad);
+    vec2 rotated = vec2(p.x * c - p.y * s, p.x * s + p.y * c) * uScale;
+    vec2 finalPos = rotated + center + uTranslate;
     vec2 ndc = (finalPos / uViewportSize) * 2.0 - 1.0;
     gl_Position = vec4(ndc.x, -ndc.y, 0.0, 1.0);
 }
@@ -79,6 +69,34 @@ out vec4 fragColor;
 void main() {
     vec4 c = texture(uTexture, vUV);
     fragColor = vec4(c.rgb, c.a * uOpacity);
+}
+)";
+
+const char* kPresentFragmentShader = R"(#version 300 es
+precision mediump float;
+in vec2 vUV;
+uniform sampler2D uTexture;
+out vec4 fragColor;
+void main() {
+    fragColor = vec4(texture(uTexture, vUV).rgb, 1.0);
+}
+)";
+
+const char* kSolidVertexShader = R"(#version 300 es
+layout(location = 0) in vec2 aPosition;
+uniform vec2 uViewportSize;
+void main() {
+    vec2 ndc = (aPosition / uViewportSize) * 2.0 - 1.0;
+    gl_Position = vec4(ndc.x, -ndc.y, 0.0, 1.0);
+}
+)";
+
+const char* kSolidFragmentShader = R"(#version 300 es
+precision mediump float;
+uniform vec4 uColor;
+out vec4 fragColor;
+void main() {
+    fragColor = uColor;
 }
 )";
 
@@ -178,60 +196,6 @@ void GLRenderEngine::onTouchUp() {
     queueCv_.notify_all();
 }
 
-// --- Câmera ---
-
-void GLRenderEngine::panCamera(float dx, float dy) {
-    std::lock_guard<std::mutex> lock(timelineMutex_);
-    cameraTranslateX_ += dx;
-    cameraTranslateY_ += dy;
-}
-
-void GLRenderEngine::zoomCamera(float factor, float pivotScreenX, float pivotScreenY) {
-    std::lock_guard<std::mutex> lock(timelineMutex_);
-    float cx = width_ * 0.5f, cy = height_ * 0.5f;
-    float px = pivotScreenX - cx - cameraTranslateX_;
-    float py = pivotScreenY - cy - cameraTranslateY_;
-    float newZoom = cameraZoom_ * factor;
-    if (newZoom < 0.1f) newZoom = 0.1f;
-    if (newZoom > 10.f) newZoom = 10.f;
-    float ratio = newZoom / cameraZoom_;
-    // Mantém o ponto sob o pivot (aproximadamente — não leva a rotação da câmera
-    // em conta neste ajuste, só pan+zoom; combinado com rotação simultânea o
-    // pivot pode deslizar um pouco, aceitável para navegação gestual).
-    cameraTranslateX_ -= px * (ratio - 1.f);
-    cameraTranslateY_ -= py * (ratio - 1.f);
-    cameraZoom_ = newZoom;
-}
-
-void GLRenderEngine::rotateCamera(float deltaDeg) {
-    std::lock_guard<std::mutex> lock(timelineMutex_);
-    cameraRotationDeg_ += deltaDeg;
-}
-
-void GLRenderEngine::resetCamera() {
-    std::lock_guard<std::mutex> lock(timelineMutex_);
-    cameraTranslateX_ = 0.f;
-    cameraTranslateY_ = 0.f;
-    cameraZoom_ = 1.f;
-    cameraRotationDeg_ = 0.f;
-}
-
-DrawPoint GLRenderEngine::screenToCanvas(const DrawPoint& in) const {
-    float cx = width_ * 0.5f, cy = height_ * 0.5f;
-    float px = in.x - cx - cameraTranslateX_;
-    float py = in.y - cy - cameraTranslateY_;
-    float zoom = cameraZoom_ != 0.f ? cameraZoom_ : 1.f;
-    px /= zoom;
-    py /= zoom;
-    float rad = -cameraRotationDeg_ * kDegToRad;
-    float c = std::cos(rad);
-    float s = std::sin(rad);
-    DrawPoint out = in;
-    out.x = (px * c - py * s) + cx;
-    out.y = (px * s + py * c) + cy;
-    return out;
-}
-
 // --- Pincel atual ---
 
 void GLRenderEngine::setBrushColor(uint32_t argb) {
@@ -300,6 +264,135 @@ bool GLRenderEngine::canUndo() {
 bool GLRenderEngine::canRedo() {
     std::lock_guard<std::mutex> lock(timelineMutex_);
     return !redoRecords_.empty();
+}
+
+// --- Câmera ---
+
+CameraPose GLRenderEngine::defaultCameraPose() const {
+    CameraPose p;
+    p.centerX = (float) width_ * 0.5f;
+    p.centerY = (float) height_ * 0.5f;
+    p.zoom = 1.f;
+    p.rotationDeg = 0.f;
+    return p;
+}
+
+CameraPose GLRenderEngine::resolveCameraPose(int frameIndex) const {
+    return cameraTrack_.resolve(frameIndex, defaultCameraPose());
+}
+
+float GLRenderEngine::cameraAspectValue() const {
+    switch (cameraAspectPreset_) {
+        case 1: return 16.f / 9.f;
+        case 2: return 4.f / 3.f;
+        case 3: return 1.f;
+        case 4: return 9.f / 16.f;
+        default: return height_ > 0 ? (float) width_ / (float) height_ : 1.f;
+    }
+}
+
+// Garante uma chave no frame atual ("toda transformação define uma chave", como no
+// OpenToonz). A chave nova nasce com a pose já resolvida naquele frame, então
+// criar uma chave nunca faz a câmera "pular".
+CameraKey& GLRenderEngine::ensureCameraKeyAtCurrentFrame() {
+    if (CameraKey* k = cameraTrack_.keyAt(currentFrameIndex_)) return *k;
+    CameraKey key;
+    key.frameIndex = currentFrameIndex_;
+    key.pose = resolveCameraPose(currentFrameIndex_);
+    return cameraTrack_.setKey(key);
+}
+
+void GLRenderEngine::setCameraViewMode(bool enabled) {
+    std::lock_guard<std::mutex> lock(timelineMutex_);
+    cameraViewMode_ = enabled;
+    if (enabled) { activeStroke_ = nullptr; activeLayer_ = nullptr; }
+}
+
+bool GLRenderEngine::isCameraViewMode() {
+    std::lock_guard<std::mutex> lock(timelineMutex_);
+    return cameraViewMode_;
+}
+
+void GLRenderEngine::setCameraAspectPreset(int preset) {
+    std::lock_guard<std::mutex> lock(timelineMutex_);
+    cameraAspectPreset_ = (preset < 0 || preset > 4) ? 0 : preset;
+}
+
+int GLRenderEngine::cameraAspectPreset() {
+    std::lock_guard<std::mutex> lock(timelineMutex_);
+    return cameraAspectPreset_;
+}
+
+void GLRenderEngine::setCameraPathVisible(bool visible) {
+    std::lock_guard<std::mutex> lock(timelineMutex_);
+    cameraPathVisible_ = visible;
+}
+
+void GLRenderEngine::setCameraKeyAtCurrentFrame() {
+    std::lock_guard<std::mutex> lock(timelineMutex_);
+    ensureCameraKeyAtCurrentFrame();
+}
+
+void GLRenderEngine::removeCameraKeyAtCurrentFrame() {
+    std::lock_guard<std::mutex> lock(timelineMutex_);
+    cameraTrack_.removeKey(currentFrameIndex_);
+}
+
+bool GLRenderEngine::hasCameraKeyAtCurrentFrame() {
+    std::lock_guard<std::mutex> lock(timelineMutex_);
+    return cameraTrack_.keyAt(currentFrameIndex_) != nullptr;
+}
+
+int GLRenderEngine::cameraKeyCount() {
+    std::lock_guard<std::mutex> lock(timelineMutex_);
+    return (int) cameraTrack_.count();
+}
+
+void GLRenderEngine::nudgeCamera(float dx, float dy, float zoomMultiplier, float dRotationDeg) {
+    std::lock_guard<std::mutex> lock(timelineMutex_);
+    CameraKey& k = ensureCameraKeyAtCurrentFrame();
+    k.pose.centerX += dx;
+    k.pose.centerY += dy;
+    float z = k.pose.zoom * zoomMultiplier;
+    k.pose.zoom = z < 0.1f ? 0.1f : (z > 20.f ? 20.f : z);
+    k.pose.rotationDeg += dRotationDeg;
+}
+
+void GLRenderEngine::resetCamera(int what) {
+    std::lock_guard<std::mutex> lock(timelineMutex_);
+    CameraKey& k = ensureCameraKeyAtCurrentFrame();
+    CameraPose def = defaultCameraPose();
+    switch (what) {
+        case 1: k.pose.centerX = def.centerX; k.pose.centerY = def.centerY; break;
+        case 2: k.pose.zoom = 1.f; break;
+        case 3: k.pose.rotationDeg = 0.f; break;
+        default: k.pose = def; break;
+    }
+}
+
+void GLRenderEngine::setCameraEasing(int easing) {
+    std::lock_guard<std::mutex> lock(timelineMutex_);
+    CameraKey& k = ensureCameraKeyAtCurrentFrame();
+    int e = easing < 0 ? 0 : (easing > 3 ? 3 : easing);
+    k.easing = (Easing) e;
+}
+
+int GLRenderEngine::cameraEasing() {
+    std::lock_guard<std::mutex> lock(timelineMutex_);
+    const CameraKey* k = cameraTrack_.keyAt(currentFrameIndex_);
+    return k ? (int) k->easing : (int) Easing::EaseInOut;
+}
+
+void GLRenderEngine::setCameraHold(bool hold) {
+    std::lock_guard<std::mutex> lock(timelineMutex_);
+    CameraKey& k = ensureCameraKeyAtCurrentFrame();
+    k.hold = hold;
+}
+
+bool GLRenderEngine::cameraHold() {
+    std::lock_guard<std::mutex> lock(timelineMutex_);
+    const CameraKey* k = cameraTrack_.keyAt(currentFrameIndex_);
+    return k ? k->hold : false;
 }
 
 // --- Camadas ---
@@ -412,7 +505,7 @@ void GLRenderEngine::goToFrame(int index) {
     activeLayer_ = nullptr;
 }
 
-// --- Keyframes / autoria de transform ---
+// --- Keyframes de objeto / autoria de transform ---
 
 int GLRenderEngine::frameType(int index) {
     std::lock_guard<std::mutex> lock(timelineMutex_);
@@ -477,27 +570,6 @@ void GLRenderEngine::advancePlayback(double deltaMs) {
     }
 }
 
-// --- Projeto ---
-
-bool GLRenderEngine::saveProject(const std::string& path) {
-    std::lock_guard<std::mutex> lock(timelineMutex_);
-    return saveTimelineToFile(timeline_, path);
-}
-
-bool GLRenderEngine::loadProject(const std::string& path) {
-    std::lock_guard<std::mutex> lock(timelineMutex_);
-    bool ok = loadTimelineFromFile(timeline_, path);
-    if (ok) {
-        currentFrameIndex_ = 0;
-        activeLayerIndex_ = 0;
-        activeStroke_ = nullptr;
-        activeLayer_ = nullptr;
-        undoRecords_.clear();
-        redoRecords_.clear();
-    }
-    return ok;
-}
-
 // --- EGL / render loop ---
 
 bool GLRenderEngine::initEGL(ANativeWindow* window) {
@@ -534,6 +606,8 @@ bool GLRenderEngine::initEGL(ANativeWindow* window) {
 
     strokeProgram_ = linkProgram(kStrokeVertexShader, kStrokeFragmentShader);
     compositeProgram_ = linkProgram(kCompositeVertexShader, kCompositeFragmentShader);
+    presentProgram_ = linkProgram(kCompositeVertexShader, kPresentFragmentShader);
+    solidProgram_ = linkProgram(kSolidVertexShader, kSolidFragmentShader);
 
     float quad[] = {
         0, 0,  0, 1,
@@ -546,10 +620,11 @@ bool GLRenderEngine::initEGL(ANativeWindow* window) {
     glBufferData(GL_ARRAY_BUFFER, sizeof(quad), quad, GL_STATIC_DRAW);
 
     glGenBuffers(1, &strokeVbo_);
+    glGenBuffers(1, &overlayVbo_);
 
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    return strokeProgram_ != 0 && compositeProgram_ != 0;
+    return strokeProgram_ != 0 && compositeProgram_ != 0 && presentProgram_ != 0;
 }
 
 void GLRenderEngine::destroyEGL() {
@@ -598,13 +673,15 @@ void GLRenderEngine::renderLoop() {
                 }
                 case RenderCommand::Kind::BeginStroke: {
                     std::lock_guard<std::mutex> lock(timelineMutex_);
+                    // Na vista da câmera o canvas está transformado: os toques não correspondem
+                    // a coordenadas de canvas, então o desenho fica desativado (preview apenas).
+                    if (cameraViewMode_) break;
                     Frame* frame = timeline_.frameAt((size_t) currentFrameIndex_);
                     Layer* layer = (frame && activeLayerIndex_ >= 0 && activeLayerIndex_ < (int) frame->layers.size())
                                        ? frame->layers[activeLayerIndex_].get() : nullptr;
                     if (layer && !layer->locked) {
-                        DrawPoint canvasPoint = screenToCanvas(cmd.point);
                         auto stroke = std::make_unique<Stroke>(nextStrokeId_++, currentBrush_, currentColorArgb_);
-                        stroke->addPoint(canvasPoint);
+                        stroke->addPoint(cmd.point);
                         activeStroke_ = stroke.get();
                         activeLayer_ = layer;
                         pendingUndoFrameIndex_ = currentFrameIndex_;
@@ -617,7 +694,7 @@ void GLRenderEngine::renderLoop() {
                 case RenderCommand::Kind::AddPoint: {
                     std::lock_guard<std::mutex> lock(timelineMutex_);
                     if (activeStroke_) {
-                        activeStroke_->addPoint(screenToCanvas(cmd.point));
+                        activeStroke_->addPoint(cmd.point);
                         if (activeLayer_) activeLayer_->dirty = true;
                     }
                     break;
@@ -682,6 +759,36 @@ void GLRenderEngine::ensureLayerTarget(Layer& layer) {
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
+// Textura/FBO da cena (todas as camadas compostas). Recriada quando o canvas muda de tamanho.
+void GLRenderEngine::ensureSceneTarget() {
+    if (sceneFbo_ != 0 && sceneWidth_ == width_ && sceneHeight_ == height_) return;
+    if (sceneFbo_ != 0) {
+        glDeleteFramebuffers(1, &sceneFbo_);
+        glDeleteTextures(1, &sceneTexture_);
+        sceneFbo_ = 0;
+        sceneTexture_ = 0;
+    }
+    if (width_ <= 0 || height_ <= 0) return;
+
+    glGenTextures(1, &sceneTexture_);
+    glBindTexture(GL_TEXTURE_2D, sceneTexture_);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width_, height_, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+    glGenFramebuffers(1, &sceneFbo_);
+    glBindFramebuffer(GL_FRAMEBUFFER, sceneFbo_);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, sceneTexture_, 0);
+    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+        LOGE("FBO da cena incompleto");
+    }
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    sceneWidth_ = width_;
+    sceneHeight_ = height_;
+}
+
 void GLRenderEngine::ensureStrokeVboCapacity(size_t requiredBytes) {
     if (requiredBytes <= strokeVboCapacityBytes_) return;
     size_t newCapacity = strokeVboCapacityBytes_ == 0 ? 4096 : strokeVboCapacityBytes_;
@@ -711,6 +818,19 @@ void GLRenderEngine::appendStrokeQuadVertices(std::vector<float>& out, const Str
         };
         out.insert(out.end(), std::begin(quad), std::end(quad));
     }
+}
+
+void GLRenderEngine::appendThickLine(std::vector<float>& out, float x0, float y0, float x1, float y1, float thickness) {
+    float dx = x1 - x0, dy = y1 - y0;
+    float len = std::sqrt(dx * dx + dy * dy);
+    if (len < 1e-4f) return;
+    float nx = -dy / len * thickness * 0.5f;
+    float ny = dx / len * thickness * 0.5f;
+    const float v[] = {
+        x0 + nx, y0 + ny,  x0 - nx, y0 - ny,  x1 + nx, y1 + ny,
+        x1 + nx, y1 + ny,  x0 - nx, y0 - ny,  x1 - nx, y1 - ny,
+    };
+    out.insert(out.end(), std::begin(v), std::end(v));
 }
 
 void GLRenderEngine::renderLayerContents(Layer& layer) {
@@ -763,22 +883,19 @@ void GLRenderEngine::renderLayerContents(Layer& layer) {
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
-void GLRenderEngine::compositeLayer(const Layer& layer, const Transform& frameTransform) {
+void GLRenderEngine::compositeLayer(const Layer& layer, const Transform& transform) {
     glUseProgram(compositeProgram_);
     applyLayerBlendMode(layer.blendMode);
 
     glUniform2f(glGetUniformLocation(compositeProgram_, "uViewportSize"), (float) width_, (float) height_);
-    glUniform2f(glGetUniformLocation(compositeProgram_, "uFrameTranslate"), frameTransform.translateX, frameTransform.translateY);
-    glUniform1f(glGetUniformLocation(compositeProgram_, "uFrameScale"), frameTransform.scale);
-    glUniform1f(glGetUniformLocation(compositeProgram_, "uFrameRotationRad"), frameTransform.rotationDeg * kDegToRad);
-    glUniform2f(glGetUniformLocation(compositeProgram_, "uCamTranslate"), cameraTranslateX_, cameraTranslateY_);
-    glUniform1f(glGetUniformLocation(compositeProgram_, "uCamZoom"), cameraZoom_);
-    glUniform1f(glGetUniformLocation(compositeProgram_, "uCamRotationRad"), cameraRotationDeg_ * kDegToRad);
+    glUniform2f(glGetUniformLocation(compositeProgram_, "uTranslate"), transform.translateX, transform.translateY);
+    glUniform1f(glGetUniformLocation(compositeProgram_, "uScale"), transform.scale);
+    glUniform1f(glGetUniformLocation(compositeProgram_, "uRotationRad"), transform.rotationDeg * kDegToRad);
 
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, (GLuint) layer.textureHandle);
     glUniform1i(glGetUniformLocation(compositeProgram_, "uTexture"), 0);
-    glUniform1f(glGetUniformLocation(compositeProgram_, "uOpacity"), layer.opacity * frameTransform.opacity);
+    glUniform1f(glGetUniformLocation(compositeProgram_, "uOpacity"), layer.opacity * transform.opacity);
 
     glBindBuffer(GL_ARRAY_BUFFER, fullscreenQuadVbo_);
     glEnableVertexAttribArray(0);
@@ -788,33 +905,207 @@ void GLRenderEngine::compositeLayer(const Layer& layer, const Transform& frameTr
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
 }
 
-void GLRenderEngine::drawFrame() {
+// Apresenta a textura de cena na tela.
+//  - Vista de edição: canvas inteiro, com a moldura da câmera desenhada por cima.
+//  - Vista da câmera: só o que o quadro da câmera enxerga, ajustado à tela com
+//    letterbox. Mapeamento: tela = centro + escala * R(-rot) * (pixelCanvas - centroCâmera).
+//    O vertex shader já faz "centro + R*escala*(p - centro) + T", então
+//    T = escala * R * (centro - centroCâmera).
+void GLRenderEngine::presentScene(const CameraPose& pose) {
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glViewport(0, 0, width_, height_);
+    glDisable(GL_SCISSOR_TEST);
+    glDisable(GL_BLEND);
+
+    const float W = (float) width_, H = (float) height_;
+    float translateX = 0.f, translateY = 0.f, scale = 1.f, rotationRad = 0.f;
+
+    if (cameraViewMode_) {
+        glClearColor(0.f, 0.f, 0.f, 1.f);
+        glClear(GL_COLOR_BUFFER_BIT);
+
+        const float aspect = cameraAspectValue();
+        const float fw = std::min(W, H * aspect);
+        const float fh = fw / aspect;
+        const float fit = std::min(W / fw, H / fh);
+        const float halfW = fw * fit * 0.5f;
+        const float halfH = fh * fit * 0.5f;
+
+        glEnable(GL_SCISSOR_TEST);
+        glScissor((GLint) std::floor(W * 0.5f - halfW), (GLint) std::floor(H * 0.5f - halfH),
+                  (GLsizei) std::ceil(halfW * 2.f), (GLsizei) std::ceil(halfH * 2.f));
+        glClearColor(0.3f, 0.3f, 0.3f, 1.f); // área do quadro fora do canvas (câmera olhando além da borda)
+        glClear(GL_COLOR_BUFFER_BIT);
+
+        scale = fit * pose.zoom;
+        rotationRad = -pose.rotationDeg * kDegToRad;
+        const float c = std::cos(rotationRad), s = std::sin(rotationRad);
+        const float vx = W * 0.5f - pose.centerX;
+        const float vy = H * 0.5f - pose.centerY;
+        translateX = scale * (vx * c - vy * s);
+        translateY = scale * (vx * s + vy * c);
+    } else {
+        glClearColor(0.55f, 0.55f, 0.55f, 1.f);
+        glClear(GL_COLOR_BUFFER_BIT);
+    }
+
+    glUseProgram(presentProgram_);
+    glUniform2f(glGetUniformLocation(presentProgram_, "uViewportSize"), W, H);
+    glUniform2f(glGetUniformLocation(presentProgram_, "uTranslate"), translateX, translateY);
+    glUniform1f(glGetUniformLocation(presentProgram_, "uScale"), scale);
+    glUniform1f(glGetUniformLocation(presentProgram_, "uRotationRad"), rotationRad);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, sceneTexture_);
+    glUniform1i(glGetUniformLocation(presentProgram_, "uTexture"), 0);
+
+    glBindBuffer(GL_ARRAY_BUFFER, fullscreenQuadVbo_);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void*) 0);
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void*) (2 * sizeof(float)));
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+
+    glDisable(GL_SCISSOR_TEST);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+    if (!cameraViewMode_) drawCameraOverlay(pose);
+}
+
+// Overlay da vista de edição: moldura da câmera (laranja = há chave neste frame,
+// azul = pose interpolada), cruz no centro, marca de "topo", e o caminho do
+// centro da câmera entre as chaves (como o "camera path" do Pencil2D).
+void GLRenderEngine::drawCameraOverlay(const CameraPose& pose) {
+    if (solidProgram_ == 0) return;
+
+    const float W = (float) width_, H = (float) height_;
+    const float aspect = cameraAspectValue();
+    const float fw = std::min(W, H * aspect);
+    const float fh = fw / aspect;
+    const float hx = fw * 0.5f / pose.zoom;
+    const float hy = fh * 0.5f / pose.zoom;
+    const float rad = pose.rotationDeg * kDegToRad;
+    const float c = std::cos(rad), s = std::sin(rad);
+    auto toCanvas = [&](float ox, float oy, float& x, float& y) {
+        x = pose.centerX + ox * c - oy * s;
+        y = pose.centerY + ox * s + oy * c;
+    };
+
+    glUseProgram(solidProgram_);
+    glUniform2f(glGetUniformLocation(solidProgram_, "uViewportSize"), W, H);
+    const GLint colorLoc = glGetUniformLocation(solidProgram_, "uColor");
+
+    glBindBuffer(GL_ARRAY_BUFFER, overlayVbo_);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(float), (void*) 0);
+    glDisableVertexAttribArray(1);
+
+    auto flush = [&](float r, float g, float b, float a) {
+        if (overlayScratch_.empty()) return;
+        glUniform4f(colorLoc, r, g, b, a);
+        glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr) (overlayScratch_.size() * sizeof(float)),
+                     overlayScratch_.data(), GL_DYNAMIC_DRAW);
+        glDrawArrays(GL_TRIANGLES, 0, (GLsizei) (overlayScratch_.size() / 2));
+        overlayScratch_.clear();
+    };
+    auto appendSquare = [&](float cx, float cy, float half) {
+        const float v[] = {
+            cx - half, cy - half,  cx + half, cy - half,  cx - half, cy + half,
+            cx - half, cy + half,  cx + half, cy - half,  cx + half, cy + half,
+        };
+        overlayScratch_.insert(overlayScratch_.end(), std::begin(v), std::end(v));
+    };
+
+    overlayScratch_.clear();
+
+    // Caminho do centro da câmera + marcadores nas chaves.
+    const auto& keys = cameraTrack_.keys();
+    if (cameraPathVisible_ && keys.size() >= 2) {
+        const int f0 = keys.front().frameIndex;
+        const int f1 = keys.back().frameIndex;
+        const int step = std::max(1, (f1 - f0) / 1000);
+        CameraPose prev = resolveCameraPose(f0);
+        for (int f = f0 + step;; f += step) {
+            if (f > f1) f = f1;
+            CameraPose cur = resolveCameraPose(f);
+            appendThickLine(overlayScratch_, prev.centerX, prev.centerY, cur.centerX, cur.centerY, 2.f);
+            prev = cur;
+            if (f == f1) break;
+        }
+        flush(1.f, 1.f, 1.f, 0.85f);
+        for (const auto& k : keys) appendSquare(k.pose.centerX, k.pose.centerY, 5.f);
+        flush(1.f, 0.6f, 0.1f, 1.f);
+    }
+
+    // Moldura da câmera.
+    float px[4], py[4];
+    toCanvas(-hx, -hy, px[0], py[0]);
+    toCanvas( hx, -hy, px[1], py[1]);
+    toCanvas( hx,  hy, px[2], py[2]);
+    toCanvas(-hx,  hy, px[3], py[3]);
+    for (int i = 0; i < 4; ++i) {
+        int j = (i + 1) % 4;
+        appendThickLine(overlayScratch_, px[i], py[i], px[j], py[j], 3.f);
+    }
+    // Marca de "topo" da câmera e cruz no centro.
+    float tx0, ty0, tx1, ty1;
+    toCanvas(0.f, -hy, tx0, ty0);
+    toCanvas(0.f, -hy - 16.f, tx1, ty1);
+    appendThickLine(overlayScratch_, tx0, ty0, tx1, ty1, 3.f);
+    appendThickLine(overlayScratch_, pose.centerX - 12.f, pose.centerY, pose.centerX + 12.f, pose.centerY, 2.f);
+    appendThickLine(overlayScratch_, pose.centerX, pose.centerY - 12.f, pose.centerX, pose.centerY + 12.f, 2.f);
+
+    const bool hasKey = cameraTrack_.keyAt(currentFrameIndex_) != nullptr;
+    if (hasKey) flush(1.f, 0.6f, 0.1f, 1.f);
+    else flush(0.2f, 0.7f, 1.f, 0.95f);
+}
+
+void GLRenderEngine::drawFrame() {
+    std::lock_guard<std::mutex> lock(timelineMutex_);
+
+    // Estado GL que o passo de apresentação do frame anterior pode ter alterado.
+    glDisable(GL_SCISSOR_TEST);
+    glEnable(GL_BLEND);
+
+    ensureSceneTarget();
+    if (sceneFbo_ == 0) return;
+
+    Frame* renderFrame = nullptr;
+    Transform transform;
+    if (currentFrameIndex_ >= 0 && currentFrameIndex_ < (int) timeline_.frameCount()) {
+        renderFrame = timeline_.contentSourceFrame((size_t) currentFrameIndex_);
+        transform = timeline_.resolveTransformForFrameIndex((size_t) currentFrameIndex_);
+    }
+
+    // Passo 0: atualiza a textura de cada camada suja (cada uma no seu FBO).
+    if (renderFrame) {
+        for (auto& layerPtr : renderFrame->layers) {
+            Layer& layer = *layerPtr;
+            if (!layer.visible) continue;
+            ensureLayerTarget(layer);
+            if (layer.dirty) {
+                renderLayerContents(layer);
+                layer.dirty = false;
+            }
+        }
+    }
+
+    // Passo 1: compõe todas as camadas na textura de cena (tamanho do canvas).
+    glBindFramebuffer(GL_FRAMEBUFFER, sceneFbo_);
     glViewport(0, 0, width_, height_);
     glClearColor(0.93f, 0.93f, 0.93f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT);
-
-    std::lock_guard<std::mutex> lock(timelineMutex_);
-    if (currentFrameIndex_ < 0 || currentFrameIndex_ >= (int) timeline_.frameCount()) return;
-
-    Frame* renderFrame = timeline_.contentSourceFrame((size_t) currentFrameIndex_);
-    Transform transform = timeline_.resolveTransformForFrameIndex((size_t) currentFrameIndex_);
-    if (!renderFrame) return;
-
-    for (auto& layerPtr : renderFrame->layers) {
-        Layer& layer = *layerPtr;
-        if (!layer.visible) continue;
-        ensureLayerTarget(layer);
-        if (layer.dirty) {
-            renderLayerContents(layer);
-            layer.dirty = false;
+    if (renderFrame) {
+        for (auto& layerPtr : renderFrame->layers) {
+            Layer& layer = *layerPtr;
+            if (!layer.visible) continue;
+            compositeLayer(layer, transform);
         }
-        glBindFramebuffer(GL_FRAMEBUFFER, 0);
-        glViewport(0, 0, width_, height_);
-        compositeLayer(layer, transform);
     }
-
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+    // Passo 2: apresenta a cena (vista de edição ou vista da câmera).
+    presentScene(resolveCameraPose(currentFrameIndex_));
 }
 
 } // namespace dreams

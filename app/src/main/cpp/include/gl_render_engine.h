@@ -11,6 +11,7 @@
 #include <string>
 #include <chrono>
 #include "timeline.h"
+#include "camera.h"
 
 namespace dreams {
 
@@ -31,15 +32,12 @@ struct RedoRecord {
     std::unique_ptr<Stroke> stroke;
 };
 
-// Motor de renderização OpenGL ES 3. Ver revisões anteriores para compositing,
-// VBO persistente, playback, keyframes, pincel e undo/redo. Esta revisão
-// adiciona:
-// 1) Câmera de navegação do canvas (pan/zoom/rotação via gesto de dois dedos),
-//    independente do Transform de animação dos keyframes — composta no mesmo
-//    shader como um segundo estágio de transformação. Toques de desenho (um
-//    dedo) são convertidos de coordenada de tela para coordenada de canvas via
-//    screenToCanvas antes de virar DrawPoint.
-// 2) Salvar/carregar projeto (ver project_io.h) para um arquivo binário próprio.
+// Motor de renderização OpenGL ES 3. Ver revisões anteriores (FBO por camada, VBO
+// persistente, playback, keyframes de objeto, pincel, undo/redo). Esta revisão
+// adiciona a CÂMERA: as camadas são compostas numa textura de cena (tamanho do
+// canvas) e essa textura é apresentada na tela de duas formas — vista de edição
+// (canvas inteiro + moldura da câmera sobreposta) ou vista da câmera (só o que o
+// quadro da câmera enxerga, com letterbox).
 class GLRenderEngine {
 public:
     GLRenderEngine();
@@ -53,12 +51,6 @@ public:
     void onTouchMove(float x, float y, float pressure);
     void onTouchUp();
 
-    // --- Câmera de navegação do canvas (pan/zoom/rotação) ---
-    void panCamera(float dx, float dy);
-    void zoomCamera(float factor, float pivotScreenX, float pivotScreenY);
-    void rotateCamera(float deltaDeg);
-    void resetCamera();
-
     // --- Pincel atual ---
     void setBrushColor(uint32_t argb);
     void setBrushSize(float px);
@@ -71,6 +63,23 @@ public:
     void redo();
     bool canUndo();
     bool canRedo();
+
+    // --- Câmera ---
+    void setCameraViewMode(bool enabled);   // true = preview do que a câmera enxerga (desenho desativado)
+    bool isCameraViewMode();
+    void setCameraAspectPreset(int preset); // 0=canvas, 1=16:9, 2=4:3, 3=1:1, 4=9:16
+    int cameraAspectPreset();
+    void setCameraPathVisible(bool visible);
+    void setCameraKeyAtCurrentFrame();      // cria chave no frame atual com a pose atual
+    void removeCameraKeyAtCurrentFrame();
+    bool hasCameraKeyAtCurrentFrame();
+    int cameraKeyCount();
+    void nudgeCamera(float dx, float dy, float zoomMultiplier, float dRotationDeg); // cria chave se não houver
+    void resetCamera(int what);             // 0=tudo, 1=posição, 2=zoom, 3=rotação
+    void setCameraEasing(int easing);       // 0=linear, 1=ease in, 2=ease out, 3=ease in-out
+    int cameraEasing();
+    void setCameraHold(bool hold);
+    bool cameraHold();
 
     // --- Camadas do frame corrente ---
     int layerCount();
@@ -90,7 +99,7 @@ public:
     void addFrame();
     void goToFrame(int index);
 
-    // --- Keyframes / autoria de transform ---
+    // --- Keyframes de objeto / autoria de transform ---
     int frameType(int index);
     void setFrameType(int index, int type);
     void nudgeFrameTransform(int index, float dTx, float dTy, float dScale, float dRotationDeg);
@@ -101,21 +110,26 @@ public:
     void pause();
     bool isPlaying();
 
-    // --- Projeto (salvar/carregar) ---
-    bool saveProject(const std::string& path);
-    bool loadProject(const std::string& path);
-
 private:
     void renderLoop();
     bool initEGL(ANativeWindow* window);
     void destroyEGL();
     void advancePlayback(double deltaMs);
-    DrawPoint screenToCanvas(const DrawPoint& in) const; // precisa ser chamado com timelineMutex_ já travado
 
     void drawFrame();
     void ensureLayerTarget(Layer& layer);
     void renderLayerContents(Layer& layer);
-    void compositeLayer(const Layer& layer, const Transform& frameTransform);
+    void compositeLayer(const Layer& layer, const Transform& transform);
+
+    // Câmera (os métodos abaixo assumem timelineMutex_ já travado pelo chamador)
+    CameraPose defaultCameraPose() const;
+    CameraPose resolveCameraPose(int frameIndex) const;
+    float cameraAspectValue() const;
+    CameraKey& ensureCameraKeyAtCurrentFrame();
+    void ensureSceneTarget();
+    void presentScene(const CameraPose& pose);
+    void drawCameraOverlay(const CameraPose& pose);
+    static void appendThickLine(std::vector<float>& out, float x0, float y0, float x1, float y1, float thickness);
 
     void ensureStrokeVboCapacity(size_t requiredBytes);
     static void appendStrokeQuadVertices(std::vector<float>& out, const Stroke& stroke);
@@ -128,7 +142,15 @@ private:
     int width_ = 0, height_ = 0;
     GLuint strokeProgram_ = 0;
     GLuint compositeProgram_ = 0;
+    GLuint presentProgram_ = 0;   // desenha a textura de cena na tela (alpha sempre 1)
+    GLuint solidProgram_ = 0;     // cor sólida, usado para o overlay da câmera
     GLuint fullscreenQuadVbo_ = 0;
+    GLuint overlayVbo_ = 0;
+    std::vector<float> overlayScratch_;
+
+    GLuint sceneTexture_ = 0;
+    GLuint sceneFbo_ = 0;
+    int sceneWidth_ = 0, sceneHeight_ = 0;
 
     GLuint strokeVbo_ = 0;
     size_t strokeVboCapacityBytes_ = 0;
@@ -139,12 +161,10 @@ private:
     int currentFrameIndex_ = 0;
     int activeLayerIndex_ = 0;
 
-    // Câmera de navegação — protegida por timelineMutex_ (lida no BeginStroke/
-    // AddPoint para converter toque em coordenada de canvas, e no compositeLayer).
-    float cameraTranslateX_ = 0.f;
-    float cameraTranslateY_ = 0.f;
-    float cameraZoom_ = 1.f;
-    float cameraRotationDeg_ = 0.f;
+    CameraTrack cameraTrack_;
+    bool cameraViewMode_ = false;
+    bool cameraPathVisible_ = true;
+    int cameraAspectPreset_ = 0;
 
     uint32_t currentColorArgb_ = 0xFF202020;
     Brush currentBrush_{};
