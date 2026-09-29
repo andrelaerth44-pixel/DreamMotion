@@ -293,4 +293,24 @@ Java_com_tracostudio_dreams_engine_NativeEngine_nativeIsPlaying(JNIEnv*, jobject
     return g_engine ? (jboolean) g_engine->isPlaying() : JNI_FALSE;
 }
 
+// --- Projeto (salvar/carregar) ---
+
+JNIEXPORT jboolean JNICALL
+Java_com_tracostudio_dreams_engine_NativeEngine_nativeSaveProject(JNIEnv* env, jobject, jstring path) {
+    if (!g_engine) return JNI_FALSE;
+    const char* chars = env->GetStringUTFChars(path, nullptr);
+    bool ok = chars && g_engine->saveProjectToFile(chars);
+    if (chars) env->ReleaseStringUTFChars(path, chars);
+    return (jboolean) ok;
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_tracostudio_dreams_engine_NativeEngine_nativeLoadProject(JNIEnv* env, jobject, jstring path) {
+    if (!g_engine) return JNI_FALSE;
+    const char* chars = env->GetStringUTFChars(path, nullptr);
+    bool ok = chars && g_engine->loadProjectFromFile(chars);
+    if (chars) env->ReleaseStringUTFChars(path, chars);
+    return (jboolean) ok;
+}
+
 } // extern "C"

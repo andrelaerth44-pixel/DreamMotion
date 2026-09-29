@@ -79,4 +79,10 @@ object NativeEngine {
     external fun nativePlay()
     external fun nativePause()
     external fun nativeIsPlaying(): Boolean
+
+    // --- Projeto (salvar/carregar). path = caminho absoluto de um arquivo
+    //     JSON. Retorna false se falhar (inclusive se o arquivo simplesmente
+    //     ainda não existir, no caso de nativeLoadProject). ---
+    external fun nativeSaveProject(path: String): Boolean
+    external fun nativeLoadProject(path: String): Boolean
 }
