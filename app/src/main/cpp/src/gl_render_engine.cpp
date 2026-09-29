@@ -1,7 +1,10 @@
 #include "gl_render_engine.h"
+#include "json.h"
 #include <android/log.h>
 #include <cmath>
 #include <algorithm>
+#include <fstream>
+#include <sstream>
 
 #define LOG_TAG "DreamsGL"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
@@ -36,8 +39,6 @@ void main() {
 }
 )";
 
-// Usado tanto para compor camadas na cena quanto para apresentar a cena na tela:
-// rotação+escala em torno do centro da viewport, depois translação.
 const char* kCompositeVertexShader = R"(#version 300 es
 layout(location = 0) in vec2 aUnit;
 layout(location = 1) in vec2 aUV;
@@ -291,9 +292,6 @@ float GLRenderEngine::cameraAspectValue() const {
     }
 }
 
-// Garante uma chave no frame atual ("toda transformação define uma chave", como no
-// OpenToonz). A chave nova nasce com a pose já resolvida naquele frame, então
-// criar uma chave nunca faz a câmera "pular".
 CameraKey& GLRenderEngine::ensureCameraKeyAtCurrentFrame() {
     if (CameraKey* k = cameraTrack_.keyAt(currentFrameIndex_)) return *k;
     CameraKey key;
@@ -570,6 +568,223 @@ void GLRenderEngine::advancePlayback(double deltaMs) {
     }
 }
 
+// --- Projeto (salvar/carregar) ---
+
+bool GLRenderEngine::saveProjectToFile(const std::string& path) {
+    std::lock_guard<std::mutex> lock(timelineMutex_);
+
+    json::Value root = json::Value::makeObject();
+    root.set("version", json::Value::makeNumber(1));
+    root.set("framerate", json::Value::makeNumber(timeline_.framerate()));
+    root.set("currentFrameIndex", json::Value::makeNumber(currentFrameIndex_));
+
+    json::Value brushObj = json::Value::makeObject();
+    brushObj.set("color", json::Value::makeNumber((double) (int32_t) currentColorArgb_));
+    brushObj.set("size", json::Value::makeNumber(currentBrush_.baseSizePx));
+    brushObj.set("hardness", json::Value::makeNumber(currentBrush_.hardness));
+    root.set("brush", brushObj);
+
+    json::Value framesArr = json::Value::makeArray();
+    for (size_t fi = 0; fi < timeline_.frameCount(); ++fi) {
+        Frame* f = timeline_.frameAt(fi);
+        json::Value fObj = json::Value::makeObject();
+        fObj.set("type", json::Value::makeNumber((int) f->type));
+        fObj.set("hold", json::Value::makeNumber(f->holdDurationTicks));
+        fObj.set("easing", json::Value::makeNumber((int) f->easing));
+
+        json::Value tObj = json::Value::makeObject();
+        tObj.set("tx", json::Value::makeNumber(f->transform.translateX));
+        tObj.set("ty", json::Value::makeNumber(f->transform.translateY));
+        tObj.set("scale", json::Value::makeNumber(f->transform.scale));
+        tObj.set("rot", json::Value::makeNumber(f->transform.rotationDeg));
+        tObj.set("opacity", json::Value::makeNumber(f->transform.opacity));
+        fObj.set("transform", tObj);
+
+        json::Value layersArr = json::Value::makeArray();
+        for (auto& layerPtr : f->layers) {
+            Layer& layer = *layerPtr;
+            json::Value lObj = json::Value::makeObject();
+            lObj.set("name", json::Value::makeString(layer.name));
+            lObj.set("visible", json::Value::makeBool(layer.visible));
+            lObj.set("opacity", json::Value::makeNumber(layer.opacity));
+            lObj.set("blend", json::Value::makeNumber((int) layer.blendMode));
+
+            json::Value strokesArr = json::Value::makeArray();
+            for (auto& strokePtr : layer.strokes()) {
+                Stroke& stroke = *strokePtr;
+                json::Value sObj = json::Value::makeObject();
+                sObj.set("color", json::Value::makeNumber((double) (int32_t) stroke.color()));
+
+                json::Value bObj = json::Value::makeObject();
+                bObj.set("size", json::Value::makeNumber(stroke.brush().baseSizePx));
+                bObj.set("minFactor", json::Value::makeNumber(stroke.brush().minSizeFactor));
+                bObj.set("opacity", json::Value::makeNumber(stroke.brush().opacity));
+                bObj.set("hardness", json::Value::makeNumber(stroke.brush().hardness));
+                bObj.set("spacing", json::Value::makeNumber(stroke.brush().spacing));
+                bObj.set("pressureSize", json::Value::makeBool(stroke.brush().pressureAffectsSize));
+                bObj.set("pressureOpacity", json::Value::makeBool(stroke.brush().pressureAffectsOpacity));
+                bObj.set("blend", json::Value::makeNumber((int) stroke.brush().blendMode));
+                sObj.set("brush", bObj);
+
+                json::Value ptsArr = json::Value::makeArray();
+                for (const auto& p : stroke.points()) {
+                    json::Value pObj = json::Value::makeObject();
+                    pObj.set("x", json::Value::makeNumber(p.x));
+                    pObj.set("y", json::Value::makeNumber(p.y));
+                    pObj.set("p", json::Value::makeNumber(p.pressure));
+                    ptsArr.push(pObj);
+                }
+                sObj.set("points", ptsArr);
+                strokesArr.push(sObj);
+            }
+            lObj.set("strokes", strokesArr);
+            layersArr.push(lObj);
+        }
+        fObj.set("layers", layersArr);
+        framesArr.push(fObj);
+    }
+    root.set("frames", framesArr);
+
+    json::Value camObj = json::Value::makeObject();
+    json::Value keysArr = json::Value::makeArray();
+    for (const auto& k : cameraTrack_.keys()) {
+        json::Value kObj = json::Value::makeObject();
+        kObj.set("frame", json::Value::makeNumber(k.frameIndex));
+        kObj.set("cx", json::Value::makeNumber(k.pose.centerX));
+        kObj.set("cy", json::Value::makeNumber(k.pose.centerY));
+        kObj.set("zoom", json::Value::makeNumber(k.pose.zoom));
+        kObj.set("rot", json::Value::makeNumber(k.pose.rotationDeg));
+        kObj.set("easing", json::Value::makeNumber((int) k.easing));
+        kObj.set("hold", json::Value::makeBool(k.hold));
+        keysArr.push(kObj);
+    }
+    camObj.set("keys", keysArr);
+    camObj.set("aspectPreset", json::Value::makeNumber(cameraAspectPreset_));
+    root.set("camera", camObj);
+
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    if (!out.is_open()) {
+        LOGE("Nao foi possivel abrir '%s' para escrita", path.c_str());
+        return false;
+    }
+    std::string text = root.dump();
+    out.write(text.data(), (std::streamsize) text.size());
+    bool okWrite = out.good();
+    out.close();
+    if (!okWrite) LOGE("Falha ao escrever o projeto em '%s'", path.c_str());
+    else LOGI("Projeto salvo em '%s' (%zu bytes)", path.c_str(), text.size());
+    return okWrite;
+}
+
+bool GLRenderEngine::loadProjectFromFile(const std::string& path) {
+    std::ifstream in(path, std::ios::binary);
+    if (!in.is_open()) return false; // arquivo ainda nao existe (ex.: primeira execucao) - nao eh erro
+    std::ostringstream ss;
+    ss << in.rdbuf();
+    std::string text = ss.str();
+    in.close();
+    if (text.empty()) return false;
+
+    bool parsedOk = false;
+    json::Value root = json::parse(text, &parsedOk);
+    if (!parsedOk || root.type() != json::Type::Object) {
+        LOGE("Projeto em '%s' invalido ou corrompido", path.c_str());
+        return false;
+    }
+
+    std::lock_guard<std::mutex> lock(timelineMutex_);
+
+    int framerate = root.has("framerate") ? root.get("framerate").asInt(24) : 24;
+    if (framerate < 1) framerate = 24;
+    timeline_.resetEmpty(framerate);
+
+    for (const auto& fVal : root.get("frames").items()) {
+        FrameType type = (FrameType) fVal.get("type").asInt(0);
+        Frame* f = timeline_.appendFrame(type);
+        f->holdDurationTicks = fVal.has("hold") ? fVal.get("hold").asInt(1) : 1;
+        if (f->holdDurationTicks < 1) f->holdDurationTicks = 1;
+        f->easing = (Easing) fVal.get("easing").asInt((int) Easing::EaseInOut);
+
+        const json::Value& t = fVal.get("transform");
+        f->transform.translateX = t.get("tx").asFloat(0.f);
+        f->transform.translateY = t.get("ty").asFloat(0.f);
+        f->transform.scale = t.get("scale").asFloat(1.f);
+        f->transform.rotationDeg = t.get("rot").asFloat(0.f);
+        f->transform.opacity = t.get("opacity").asFloat(1.f);
+
+        f->layers.clear(); // descarta a camada padrao criada pelo construtor de Frame
+        for (const auto& lVal : fVal.get("layers").items()) {
+            auto layer = std::make_unique<Layer>(lVal.get("name").asString("Camada"));
+            layer->visible = lVal.has("visible") ? lVal.get("visible").asBool(true) : true;
+            layer->opacity = lVal.get("opacity").asFloat(1.f);
+            layer->blendMode = (BlendMode) lVal.get("blend").asInt(0);
+
+            for (const auto& sVal : lVal.get("strokes").items()) {
+                uint32_t color = (uint32_t) (int32_t) sVal.get("color").asInt(0);
+                Brush brush;
+                const json::Value& bVal = sVal.get("brush");
+                brush.baseSizePx = bVal.get("size").asFloat(24.f);
+                brush.minSizeFactor = bVal.get("minFactor").asFloat(0.2f);
+                brush.opacity = bVal.get("opacity").asFloat(1.f);
+                brush.hardness = bVal.get("hardness").asFloat(0.75f);
+                brush.spacing = bVal.get("spacing").asFloat(0.1f);
+                brush.pressureAffectsSize = bVal.has("pressureSize") ? bVal.get("pressureSize").asBool(true) : true;
+                brush.pressureAffectsOpacity = bVal.has("pressureOpacity") ? bVal.get("pressureOpacity").asBool(true) : true;
+                brush.blendMode = (BlendMode) bVal.get("blend").asInt(0);
+
+                auto stroke = std::make_unique<Stroke>(nextStrokeId_++, brush, color);
+                for (const auto& pVal : sVal.get("points").items()) {
+                    DrawPoint p;
+                    p.x = pVal.get("x").asFloat(0.f);
+                    p.y = pVal.get("y").asFloat(0.f);
+                    p.pressure = pVal.get("p").asFloat(1.f);
+                    stroke->addPoint(p);
+                }
+                stroke->finish();
+                layer->addStroke(std::move(stroke)); // marca dirty=true; redesenha no proximo frame
+            }
+            f->layers.push_back(std::move(layer));
+        }
+        if (f->layers.empty()) f->layers.push_back(std::make_unique<Layer>("Camada 1"));
+    }
+    if (timeline_.frameCount() == 0) timeline_.appendFrame(FrameType::Drawn); // projeto vazio: garante ao menos 1 frame
+
+    cameraTrack_ = CameraTrack{};
+    if (root.has("camera")) {
+        const json::Value& camObj = root.get("camera");
+        for (const auto& kVal : camObj.get("keys").items()) {
+            CameraKey k;
+            k.frameIndex = kVal.get("frame").asInt(0);
+            k.pose.centerX = kVal.get("cx").asFloat(0.f);
+            k.pose.centerY = kVal.get("cy").asFloat(0.f);
+            k.pose.zoom = kVal.get("zoom").asFloat(1.f);
+            k.pose.rotationDeg = kVal.get("rot").asFloat(0.f);
+            k.easing = (Easing) kVal.get("easing").asInt((int) Easing::EaseInOut);
+            k.hold = kVal.has("hold") ? kVal.get("hold").asBool(false) : false;
+            cameraTrack_.setKey(k);
+        }
+        cameraAspectPreset_ = camObj.has("aspectPreset") ? camObj.get("aspectPreset").asInt(0) : 0;
+    }
+
+    if (root.has("brush")) {
+        const json::Value& bObj = root.get("brush");
+        if (bObj.has("color")) currentColorArgb_ = (uint32_t) (int32_t) bObj.get("color").asInt((int32_t) currentColorArgb_);
+        if (bObj.has("size")) currentBrush_.baseSizePx = bObj.get("size").asFloat(currentBrush_.baseSizePx);
+        if (bObj.has("hardness")) currentBrush_.hardness = bObj.get("hardness").asFloat(currentBrush_.hardness);
+    }
+
+    currentFrameIndex_ = root.has("currentFrameIndex") ? root.get("currentFrameIndex").asInt(0) : 0;
+    if (currentFrameIndex_ < 0 || currentFrameIndex_ >= (int) timeline_.frameCount()) currentFrameIndex_ = 0;
+    activeLayerIndex_ = 0;
+    activeStroke_ = nullptr;
+    activeLayer_ = nullptr;
+    undoRecords_.clear();
+    redoRecords_.clear();
+
+    LOGI("Projeto carregado de '%s' (%zu frames)", path.c_str(), timeline_.frameCount());
+    return true;
+}
+
 // --- EGL / render loop ---
 
 bool GLRenderEngine::initEGL(ANativeWindow* window) {
@@ -587,7 +802,7 @@ bool GLRenderEngine::initEGL(ANativeWindow* window) {
     EGLConfig config;
     EGLint numConfigs;
     eglChooseConfig(display_, configAttribs, &config, 1, &numConfigs);
-    if (numConfigs == 0) { LOGE("Nenhum EGLConfig compatível"); return false; }
+    if (numConfigs == 0) { LOGE("Nenhum EGLConfig compativel"); return false; }
 
     EGLint format;
     eglGetConfigAttrib(display_, config, EGL_NATIVE_VISUAL_ID, &format);
@@ -644,7 +859,7 @@ void GLRenderEngine::destroyEGL() {
 
 void GLRenderEngine::renderLoop() {
     if (!initEGL(window_)) {
-        LOGE("Inicialização EGL falhou — encerrando thread de render");
+        LOGE("Inicializacao EGL falhou - encerrando thread de render");
         running_ = false;
         return;
     }
@@ -673,8 +888,6 @@ void GLRenderEngine::renderLoop() {
                 }
                 case RenderCommand::Kind::BeginStroke: {
                     std::lock_guard<std::mutex> lock(timelineMutex_);
-                    // Na vista da câmera o canvas está transformado: os toques não correspondem
-                    // a coordenadas de canvas, então o desenho fica desativado (preview apenas).
                     if (cameraViewMode_) break;
                     Frame* frame = timeline_.frameAt((size_t) currentFrameIndex_);
                     Layer* layer = (frame && activeLayerIndex_ >= 0 && activeLayerIndex_ < (int) frame->layers.size())
@@ -759,7 +972,6 @@ void GLRenderEngine::ensureLayerTarget(Layer& layer) {
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
-// Textura/FBO da cena (todas as camadas compostas). Recriada quando o canvas muda de tamanho.
 void GLRenderEngine::ensureSceneTarget() {
     if (sceneFbo_ != 0 && sceneWidth_ == width_ && sceneHeight_ == height_) return;
     if (sceneFbo_ != 0) {
@@ -905,12 +1117,6 @@ void GLRenderEngine::compositeLayer(const Layer& layer, const Transform& transfo
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
 }
 
-// Apresenta a textura de cena na tela.
-//  - Vista de edição: canvas inteiro, com a moldura da câmera desenhada por cima.
-//  - Vista da câmera: só o que o quadro da câmera enxerga, ajustado à tela com
-//    letterbox. Mapeamento: tela = centro + escala * R(-rot) * (pixelCanvas - centroCâmera).
-//    O vertex shader já faz "centro + R*escala*(p - centro) + T", então
-//    T = escala * R * (centro - centroCâmera).
 void GLRenderEngine::presentScene(const CameraPose& pose) {
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     glViewport(0, 0, width_, height_);
@@ -934,7 +1140,7 @@ void GLRenderEngine::presentScene(const CameraPose& pose) {
         glEnable(GL_SCISSOR_TEST);
         glScissor((GLint) std::floor(W * 0.5f - halfW), (GLint) std::floor(H * 0.5f - halfH),
                   (GLsizei) std::ceil(halfW * 2.f), (GLsizei) std::ceil(halfH * 2.f));
-        glClearColor(0.3f, 0.3f, 0.3f, 1.f); // área do quadro fora do canvas (câmera olhando além da borda)
+        glClearColor(0.3f, 0.3f, 0.3f, 1.f);
         glClear(GL_COLOR_BUFFER_BIT);
 
         scale = fit * pose.zoom;
@@ -972,9 +1178,6 @@ void GLRenderEngine::presentScene(const CameraPose& pose) {
     if (!cameraViewMode_) drawCameraOverlay(pose);
 }
 
-// Overlay da vista de edição: moldura da câmera (laranja = há chave neste frame,
-// azul = pose interpolada), cruz no centro, marca de "topo", e o caminho do
-// centro da câmera entre as chaves (como o "camera path" do Pencil2D).
 void GLRenderEngine::drawCameraOverlay(const CameraPose& pose) {
     if (solidProgram_ == 0) return;
 
@@ -1018,7 +1221,6 @@ void GLRenderEngine::drawCameraOverlay(const CameraPose& pose) {
 
     overlayScratch_.clear();
 
-    // Caminho do centro da câmera + marcadores nas chaves.
     const auto& keys = cameraTrack_.keys();
     if (cameraPathVisible_ && keys.size() >= 2) {
         const int f0 = keys.front().frameIndex;
@@ -1037,7 +1239,6 @@ void GLRenderEngine::drawCameraOverlay(const CameraPose& pose) {
         flush(1.f, 0.6f, 0.1f, 1.f);
     }
 
-    // Moldura da câmera.
     float px[4], py[4];
     toCanvas(-hx, -hy, px[0], py[0]);
     toCanvas( hx, -hy, px[1], py[1]);
@@ -1047,7 +1248,6 @@ void GLRenderEngine::drawCameraOverlay(const CameraPose& pose) {
         int j = (i + 1) % 4;
         appendThickLine(overlayScratch_, px[i], py[i], px[j], py[j], 3.f);
     }
-    // Marca de "topo" da câmera e cruz no centro.
     float tx0, ty0, tx1, ty1;
     toCanvas(0.f, -hy, tx0, ty0);
     toCanvas(0.f, -hy - 16.f, tx1, ty1);
@@ -1063,7 +1263,6 @@ void GLRenderEngine::drawCameraOverlay(const CameraPose& pose) {
 void GLRenderEngine::drawFrame() {
     std::lock_guard<std::mutex> lock(timelineMutex_);
 
-    // Estado GL que o passo de apresentação do frame anterior pode ter alterado.
     glDisable(GL_SCISSOR_TEST);
     glEnable(GL_BLEND);
 
@@ -1077,7 +1276,6 @@ void GLRenderEngine::drawFrame() {
         transform = timeline_.resolveTransformForFrameIndex((size_t) currentFrameIndex_);
     }
 
-    // Passo 0: atualiza a textura de cada camada suja (cada uma no seu FBO).
     if (renderFrame) {
         for (auto& layerPtr : renderFrame->layers) {
             Layer& layer = *layerPtr;
@@ -1090,7 +1288,6 @@ void GLRenderEngine::drawFrame() {
         }
     }
 
-    // Passo 1: compõe todas as camadas na textura de cena (tamanho do canvas).
     glBindFramebuffer(GL_FRAMEBUFFER, sceneFbo_);
     glViewport(0, 0, width_, height_);
     glClearColor(0.93f, 0.93f, 0.93f, 1.0f);
@@ -1104,7 +1301,6 @@ void GLRenderEngine::drawFrame() {
     }
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
-    // Passo 2: apresenta a cena (vista de edição ou vista da câmera).
     presentScene(resolveCameraPose(currentFrameIndex_));
 }
 
