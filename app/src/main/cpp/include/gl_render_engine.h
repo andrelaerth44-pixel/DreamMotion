@@ -33,11 +33,9 @@ struct RedoRecord {
 };
 
 // Motor de renderização OpenGL ES 3. Ver revisões anteriores (FBO por camada, VBO
-// persistente, playback, keyframes de objeto, pincel, undo/redo). Esta revisão
-// adiciona a CÂMERA: as camadas são compostas numa textura de cena (tamanho do
-// canvas) e essa textura é apresentada na tela de duas formas — vista de edição
-// (canvas inteiro + moldura da câmera sobreposta) ou vista da câmera (só o que o
-// quadro da câmera enxerga, com letterbox).
+// persistente, playback, keyframes de objeto, pincel, undo/redo, câmera). Esta
+// revisão adiciona salvar/carregar projeto (JSON próprio em json.h/json.cpp),
+// para não perder o trabalho ao fechar o app.
 class GLRenderEngine {
 public:
     GLRenderEngine();
@@ -65,18 +63,18 @@ public:
     bool canRedo();
 
     // --- Câmera ---
-    void setCameraViewMode(bool enabled);   // true = preview do que a câmera enxerga (desenho desativado)
+    void setCameraViewMode(bool enabled);
     bool isCameraViewMode();
-    void setCameraAspectPreset(int preset); // 0=canvas, 1=16:9, 2=4:3, 3=1:1, 4=9:16
+    void setCameraAspectPreset(int preset);
     int cameraAspectPreset();
     void setCameraPathVisible(bool visible);
-    void setCameraKeyAtCurrentFrame();      // cria chave no frame atual com a pose atual
+    void setCameraKeyAtCurrentFrame();
     void removeCameraKeyAtCurrentFrame();
     bool hasCameraKeyAtCurrentFrame();
     int cameraKeyCount();
-    void nudgeCamera(float dx, float dy, float zoomMultiplier, float dRotationDeg); // cria chave se não houver
-    void resetCamera(int what);             // 0=tudo, 1=posição, 2=zoom, 3=rotação
-    void setCameraEasing(int easing);       // 0=linear, 1=ease in, 2=ease out, 3=ease in-out
+    void nudgeCamera(float dx, float dy, float zoomMultiplier, float dRotationDeg);
+    void resetCamera(int what);
+    void setCameraEasing(int easing);
     int cameraEasing();
     void setCameraHold(bool hold);
     bool cameraHold();
@@ -110,6 +108,16 @@ public:
     void pause();
     bool isPlaying();
 
+    // --- Projeto (salvar/carregar) ---
+    // Grava/lê um arquivo JSON no caminho absoluto dado. Não toca em GL (só
+    // dados de CPU protegidos por timelineMutex_), então é seguro chamar de
+    // qualquer thread, mesmo antes da EGL estar inicializada — mas só tem
+    // efeito se a engine (g_engine) já existir do lado do chamador JNI.
+    // loadProjectFromFile retorna false também quando o arquivo simplesmente
+    // não existe ainda (ex.: primeira execução), não só em erro real.
+    bool saveProjectToFile(const std::string& path);
+    bool loadProjectFromFile(const std::string& path);
+
 private:
     void renderLoop();
     bool initEGL(ANativeWindow* window);
@@ -121,7 +129,6 @@ private:
     void renderLayerContents(Layer& layer);
     void compositeLayer(const Layer& layer, const Transform& transform);
 
-    // Câmera (os métodos abaixo assumem timelineMutex_ já travado pelo chamador)
     CameraPose defaultCameraPose() const;
     CameraPose resolveCameraPose(int frameIndex) const;
     float cameraAspectValue() const;
@@ -142,8 +149,8 @@ private:
     int width_ = 0, height_ = 0;
     GLuint strokeProgram_ = 0;
     GLuint compositeProgram_ = 0;
-    GLuint presentProgram_ = 0;   // desenha a textura de cena na tela (alpha sempre 1)
-    GLuint solidProgram_ = 0;     // cor sólida, usado para o overlay da câmera
+    GLuint presentProgram_ = 0;
+    GLuint solidProgram_ = 0;
     GLuint fullscreenQuadVbo_ = 0;
     GLuint overlayVbo_ = 0;
     std::vector<float> overlayScratch_;

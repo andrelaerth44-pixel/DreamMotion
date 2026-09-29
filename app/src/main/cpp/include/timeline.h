@@ -39,12 +39,13 @@ public:
         return frames_.back().get();
     }
 
-    // Descarta toda a timeline atual e recomeça com o framerate dado e 1 frame
-    // Drawn vazio — usado antes de carregar um projeto salvo (ver project_io.h).
-    void reset(int framerate) {
+    // Remove todos os frames e redefine o framerate. Usado por
+    // GLRenderEngine::loadProjectFromFile antes de reconstruir a timeline a
+    // partir do arquivo — depois de chamar isto, frameCount() é 0 até o
+    // chamador popular via appendFrame novamente.
+    void resetEmpty(int framerate) {
         frames_.clear();
-        framerate_ = framerate > 0 ? framerate : 24;
-        frames_.push_back(std::make_unique<Frame>());
+        framerate_ = framerate;
     }
 
     Transform resolveTransformAtTick(int64_t tick) const;

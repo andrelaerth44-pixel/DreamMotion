@@ -6,7 +6,7 @@ add_library(dreamsengine SHARED
     src/gl_render_engine.cpp
     src/timeline.cpp
     src/stroke.cpp
-    src/project_io.cpp
+    src/json.cpp
 )
 
 target_include_directories(dreamsengine PRIVATE include)
