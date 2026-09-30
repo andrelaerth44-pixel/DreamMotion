@@ -33,9 +33,13 @@ struct RedoRecord {
 };
 
 // Motor de renderização OpenGL ES 3. Ver revisões anteriores (FBO por camada, VBO
-// persistente, playback, keyframes de objeto, pincel, undo/redo, câmera). Esta
-// revisão adiciona salvar/carregar projeto (JSON próprio em json.h/json.cpp),
-// para não perder o trabalho ao fechar o app.
+// persistente, playback, keyframes de objeto, pincel, undo/redo, câmera, projeto
+// salvável). Esta revisão corrige um vazamento real: remover uma camada ou
+// carregar um projeto descartava objetos Layer sem liberar as texturas/FBOs
+// OpenGL que eles tinham alocado. Como esses descartes acontecem tipicamente na
+// UI thread (sem o contexto EGL corrente), a deletação de verdade é enfileirada
+// (queueLayerGLResourcesForDeletion) e só executada pela render thread
+// (drainPendingGLDeletions, chamada no início de drawFrame).
 class GLRenderEngine {
 public:
     GLRenderEngine();
@@ -109,12 +113,6 @@ public:
     bool isPlaying();
 
     // --- Projeto (salvar/carregar) ---
-    // Grava/lê um arquivo JSON no caminho absoluto dado. Não toca em GL (só
-    // dados de CPU protegidos por timelineMutex_), então é seguro chamar de
-    // qualquer thread, mesmo antes da EGL estar inicializada — mas só tem
-    // efeito se a engine (g_engine) já existir do lado do chamador JNI.
-    // loadProjectFromFile retorna false também quando o arquivo simplesmente
-    // não existe ainda (ex.: primeira execução), não só em erro real.
     bool saveProjectToFile(const std::string& path);
     bool loadProjectFromFile(const std::string& path);
 
@@ -128,6 +126,13 @@ private:
     void ensureLayerTarget(Layer& layer);
     void renderLayerContents(Layer& layer);
     void compositeLayer(const Layer& layer, const Transform& transform);
+
+    // Gestão de recursos GL de camadas descartadas (ver comentário da classe).
+    // queueLayerGLResourcesForDeletion assume timelineMutex_ já travado pelo
+    // chamador (removeLayer, loadProjectFromFile). drainPendingGLDeletions
+    // assume estar rodando na render thread com o contexto EGL corrente.
+    void queueLayerGLResourcesForDeletion(Layer& layer);
+    void drainPendingGLDeletions();
 
     CameraPose defaultCameraPose() const;
     CameraPose resolveCameraPose(int frameIndex) const;
@@ -167,6 +172,12 @@ private:
     Timeline timeline_{24};
     int currentFrameIndex_ = 0;
     int activeLayerIndex_ = 0;
+
+    // Handles de textura/FBO de camadas já descartadas, aguardando deletação
+    // pela render thread (ver comentário da classe). Protegidos por
+    // timelineMutex_, como todo o resto do estado de CPU.
+    std::vector<GLuint> pendingDeleteTextures_;
+    std::vector<GLuint> pendingDeleteFbos_;
 
     CameraTrack cameraTrack_;
     bool cameraViewMode_ = false;
