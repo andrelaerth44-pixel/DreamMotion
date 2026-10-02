@@ -158,18 +158,37 @@ GLRenderEngine::GLRenderEngine() = default;
 GLRenderEngine::~GLRenderEngine() { stop(); }
 
 void GLRenderEngine::start(ANativeWindow* window) {
-    if (running_.exchange(true)) return;
+    if (running_.exchange(true)) {
+        // Ja estava rodando: a referencia extra do ANativeWindow adquirida pelo
+        // chamador JNI nao sera usada por ninguem, entao devolvemos aqui.
+        if (window) ANativeWindow_release(window);
+        return;
+    }
+    // Se a render thread anterior terminou sozinha (ex.: falha de EGL), ela ainda
+    // esta "joinable"; atribuir uma nova std::thread por cima chamaria terminate().
+    if (renderThread_.joinable()) renderThread_.join();
+    {
+        // Descarta comandos de uma sessao anterior (inclusive um Shutdown que a
+        // thread antiga nao chegou a consumir, o que mataria a nova logo no inicio).
+        std::lock_guard<std::mutex> lock(queueMutex_);
+        commandQueue_.clear();
+    }
     window_ = window;
     renderThread_ = std::thread(&GLRenderEngine::renderLoop, this);
 }
 
 void GLRenderEngine::stop() {
-    if (!running_.exchange(false)) return;
-    {
-        std::lock_guard<std::mutex> lock(queueMutex_);
-        commandQueue_.push_back({RenderCommand::Kind::Shutdown});
+    bool wasRunning = running_.exchange(false);
+    if (wasRunning) {
+        {
+            std::lock_guard<std::mutex> lock(queueMutex_);
+            commandQueue_.push_back({RenderCommand::Kind::Shutdown});
+        }
+        queueCv_.notify_all();
     }
-    queueCv_.notify_all();
+    // Sempre faz join se houver thread, mesmo que ela ja tenha encerrado por conta
+    // propria (running_ false por falha de EGL): destruir uma std::thread joinable
+    // chama terminate().
     if (renderThread_.joinable()) renderThread_.join();
 }
 
@@ -267,7 +286,7 @@ bool GLRenderEngine::canRedo() {
     return !redoRecords_.empty();
 }
 
-// --- Câmera ---
+// --- Camera ---
 
 CameraPose GLRenderEngine::defaultCameraPose() const {
     CameraPose p;
@@ -413,6 +432,40 @@ void GLRenderEngine::drainPendingGLDeletions() {
     }
 }
 
+// Roda na render thread logo apos initEGL. Quando a Surface e recriada o contexto
+// EGL e novo: todos os handles de textura/FBO/buffer do contexto antigo morreram
+// com ele. Nao ha nada a deletar - so esquecer, para que ensureLayerTarget,
+// ensureSceneTarget e ensureStrokeVboCapacity realoquem tudo no contexto novo.
+// Importante limpar tambem as filas de delecao: ids do contexto antigo poderiam
+// coincidir com ids de objetos novos e apagar objetos validos.
+void GLRenderEngine::resetGLStateForNewContext() {
+    std::lock_guard<std::mutex> lock(timelineMutex_);
+    sceneFbo_ = 0;
+    sceneTexture_ = 0;
+    sceneWidth_ = 0;
+    sceneHeight_ = 0;
+    strokeVboCapacityBytes_ = 0;
+    pendingDeleteTextures_.clear();
+    pendingDeleteFbos_.clear();
+    for (size_t fi = 0; fi < timeline_.frameCount(); ++fi) {
+        Frame* f = timeline_.frameAt(fi);
+        if (!f) continue;
+        for (auto& l : f->layers) {
+            l->textureHandle = -1;
+            l->fboHandle = -1;
+            l->dirty = true;
+        }
+    }
+    // Gesto interrompido pela perda da Surface: fecha o traco e registra no undo,
+    // senao ele ficaria para sempre "em andamento" e fora do historico.
+    if (activeStroke_) {
+        activeStroke_->finish();
+        undoRecords_.push_back({pendingUndoFrameIndex_, pendingUndoLayerIndex_});
+    }
+    activeStroke_ = nullptr;
+    activeLayer_ = nullptr;
+}
+
 // --- Camadas ---
 
 int GLRenderEngine::layerCount() {
@@ -478,8 +531,6 @@ void GLRenderEngine::removeLayer(int index) {
         activeStroke_ = nullptr;
         activeLayer_ = nullptr;
     }
-    // Enfileira a textura/FBO da camada para a render thread deletar de verdade
-    // (esta chamada vem da UI thread, sem contexto EGL corrente).
     queueLayerGLResourcesForDeletion(*f->layers[index]);
     f->layers.erase(f->layers.begin() + index);
     if (activeLayerIndex_ >= (int) f->layers.size()) activeLayerIndex_ = (int) f->layers.size() - 1;
@@ -720,9 +771,8 @@ bool GLRenderEngine::loadProjectFromFile(const std::string& path) {
     int framerate = root.has("framerate") ? root.get("framerate").asInt(24) : 24;
     if (framerate < 1) framerate = 24;
 
-    // Antes de descartar a timeline antiga, enfileira as texturas/FBOs de TODAS
-    // as camadas de TODOS os frames (nao so do frame corrente) para a render
-    // thread deletar — senao os handles GL ficam orfaos na GPU.
+    // Antes de descartar a timeline antiga, enfileira as texturas/FBOs de TODAS as
+    // camadas de TODOS os frames para a render thread deletar.
     for (size_t fi = 0; fi < timeline_.frameCount(); ++fi) {
         Frame* oldFrame = timeline_.frameAt(fi);
         if (!oldFrame) continue;
@@ -875,14 +925,17 @@ bool GLRenderEngine::initEGL(ANativeWindow* window) {
 }
 
 void GLRenderEngine::destroyEGL() {
-    if (display_ == EGL_NO_DISPLAY) return;
-    eglMakeCurrent(display_, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
-    if (context_ != EGL_NO_CONTEXT) eglDestroyContext(display_, context_);
-    if (surface_ != EGL_NO_SURFACE) eglDestroySurface(display_, surface_);
-    eglTerminate(display_);
-    display_ = EGL_NO_DISPLAY;
-    surface_ = EGL_NO_SURFACE;
-    context_ = EGL_NO_CONTEXT;
+    if (display_ != EGL_NO_DISPLAY) {
+        eglMakeCurrent(display_, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+        if (context_ != EGL_NO_CONTEXT) eglDestroyContext(display_, context_);
+        if (surface_ != EGL_NO_SURFACE) eglDestroySurface(display_, surface_);
+        eglTerminate(display_);
+        display_ = EGL_NO_DISPLAY;
+        surface_ = EGL_NO_SURFACE;
+        context_ = EGL_NO_CONTEXT;
+    }
+    // A referencia ao ANativeWindow e liberada mesmo quando initEGL falhou antes de
+    // criar o display (antes isso vazava, pois o return antecipado pulava o release).
     if (window_) {
         ANativeWindow_release(window_);
         window_ = nullptr;
@@ -892,9 +945,11 @@ void GLRenderEngine::destroyEGL() {
 void GLRenderEngine::renderLoop() {
     if (!initEGL(window_)) {
         LOGE("Inicializacao EGL falhou - encerrando thread de render");
+        destroyEGL();
         running_ = false;
         return;
     }
+    resetGLStateForNewContext();
     LOGI("Render thread nativa iniciada (%dx%d)", width_, height_);
     lastFrameTime_ = std::chrono::steady_clock::now();
 
@@ -913,10 +968,8 @@ void GLRenderEngine::renderLoop() {
                 case RenderCommand::Kind::Resize: {
                     std::lock_guard<std::mutex> lock(timelineMutex_);
                     width_ = (int) cmd.width; height_ = (int) cmd.height;
-                    // Estamos na render thread com o contexto corrente, entao deletamos
-                    // direto. Percorre TODOS os frames: antes so o frame corrente era
-                    // invalidado, deixando camadas de outros frames com textura do
-                    // tamanho antigo (e os handles antigos vazando).
+                    // Estamos na render thread com o contexto corrente: deleta direto,
+                    // em TODOS os frames (nao so no corrente).
                     for (size_t fi = 0; fi < timeline_.frameCount(); ++fi) {
                         Frame* f = timeline_.frameAt(fi);
                         if (!f) continue;
@@ -1307,8 +1360,6 @@ void GLRenderEngine::drawCameraOverlay(const CameraPose& pose) {
 void GLRenderEngine::drawFrame() {
     std::lock_guard<std::mutex> lock(timelineMutex_);
 
-    // Primeiro: libera de verdade as texturas/FBOs de camadas descartadas desde o
-    // ultimo frame (removeLayer / loadProjectFromFile so enfileiram os handles).
     drainPendingGLDeletions();
 
     glDisable(GL_SCISSOR_TEST);

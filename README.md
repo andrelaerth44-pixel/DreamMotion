@@ -2,8 +2,23 @@
 
 Versão Android inspirada no Procreate Dreams: desenho em camadas + timeline de animação
 com keyframes, câmera virtual e projeto salvável. Esqueleto funcional em evolução,
-não o app completo. **Nada aqui foi compilado nem executado em dispositivo ainda** —
-análise e testes pontuais foram feitos só para a lógica de JSON (fora do Android).
+não o app completo.
+
+## O que foi (e não foi) verificado
+
+**Nunca rodou em dispositivo nem foi compilado com o NDK/Gradle.** Verificações feitas
+em sandbox Linux comum (g++ 13, C++17):
+
+- `json.h/json.cpp`: teste de round-trip (gerar → parsear → comparar), incluindo
+  cor ARGB com bit de sinal.
+- `gl_render_engine.cpp` (+ `timeline`, `stroke`, `json`): **compila sem erros** com
+  `-Wall -Wextra` contra *stubs* de EGL/GLES/Android que declaram só as funções
+  usadas, e uma checagem de símbolos (`nm`) confirmou que todo método `dreams::`
+  declarado/usado tem definição. Isso pega erros de tipo, includes e métodos
+  declarados sem corpo — **não** pega erros de uso da API GL real (ordem de chamadas,
+  estados), shaders (só o driver compila GLSL), nem JNI/Kotlin/Gradle/CMake.
+- Os avisos restantes (`-Wmissing-field-initializers` em `RenderCommand`) são
+  inofensivos.
 
 ## Arquitetura
 
@@ -11,41 +26,51 @@ análise e testes pontuais foram feitos só para a lógica de JSON (fora do Andr
   timeline, pincel, undo/redo, câmera, salvar/carregar) e renderização OpenGL ES 3
   em thread nativa dedicada com contexto EGL próprio.
 - **Ponte JNI** (`native_bridge.cpp` + `NativeEngine.kt`).
-- **UI Android** (Views programáticas): `DreamsSurfaceView`, `ProjectPanel`
-  (salvar/carregar), `BrushPanel`, `LayersPanel`, `CameraPanel`.
+- **UI Android** (Views programáticas): `DreamsSurfaceView`, `ProjectPanel`,
+  `BrushPanel`, `LayersPanel`, `CameraPanel`.
+
+## Ciclo de vida da Surface (corrigido nesta revisão)
+
+Ao ir para background a `Surface` é destruída (`stop()`); ao voltar é criada outra
+(`start()`), com um **contexto EGL novo**. Antes disso, os handles de textura/FBO
+das camadas, da cena e o tamanho do VBO de traços continuavam marcados como
+"já alocados" e o app renderizaria com ids inválidos (tela em branco / erros GL).
+Agora:
+
+- `resetGLStateForNewContext()` roda na render thread logo após `initEGL`: esquece
+  handles de **todas** as camadas de todos os frames, da cena e do VBO, limpa as
+  filas de deleção (ids antigos poderiam coincidir com objetos novos) e fecha um
+  traço interrompido pela perda da Surface, registrando-o no undo.
+- `start()` descarta comandos de uma sessão anterior (um `Shutdown` não consumido
+  mataria a thread nova logo ao iniciar) e faz `join` de uma thread que morreu
+  sozinha (atribuir uma `std::thread` joinable chama `std::terminate`).
+- `stop()` sempre faz `join` se houver thread, mesmo que ela já tenha encerrado por
+  falha de EGL (destruir uma `std::thread` joinable também chama `terminate`).
+- `destroyEGL()` libera a referência do `ANativeWindow` mesmo quando `initEGL`
+  falhou cedo (antes vazava), e `start()` devolve a referência extra se já estava
+  rodando.
 
 ## Salvar / carregar projeto
 
-- Formato: JSON próprio (`include/json.h` + `src/json.cpp`), sem dependência externa.
-  Parser/writer testado por round-trip (inclusive cores ARGB com bit de sinal) fora
-  do repositório.
-- Salvo: framerate, frame atual, frames (tipo, duração, transform, easing) com camadas
-  (nome, visibilidade, opacidade, blend) e traços (cor, pincel, pontos com pressão),
-  trilha de câmera inteira e pincel atual.
+- JSON próprio (`include/json.h` + `src/json.cpp`), sem dependência externa.
+- Salvo: framerate, frame atual, frames (tipo, duração, transform, easing) com
+  camadas e traços (cor, pincel, pontos com pressão), trilha de câmera e pincel atual.
 - **Autosave** em `MainActivity.onPause()`; **autoload** em
-  `DreamsSurfaceView.surfaceCreated` (no-op silencioso se o arquivo não existir).
-- Botões manuais Salvar/Carregar no `ProjectPanel`. Um único slot
-  (`files/current_project.json`) — sem gerenciador de múltiplos projetos ainda.
+  `DreamsSurfaceView.surfaceCreated`. Botões manuais no `ProjectPanel`. Um único
+  slot (`files/current_project.json`).
 
-## Gestão de recursos GL (corrigido)
+### Ponto de atenção conhecido
 
-Antes, remover uma camada ou carregar um projeto descartava objetos `Layer` sem
-liberar as texturas/FBOs OpenGL deles (vazamento na GPU). Agora:
+`surfaceCreated` chama `nativeLoadProject` toda vez — inclusive ao **voltar do
+background**. Como o `onPause` acabou de salvar o estado, o load recarrega o mesmo
+conteúdo (inofensivo, mas zera o histórico de undo/redo e cancela qualquer estado
+não salvo desde então). Idealmente o autoload só aconteceria na primeira criação.
 
-- `removeLayer` e `loadProjectFromFile` (que roda na UI thread, sem contexto EGL)
-  **enfileiram** os handles (`queueLayerGLResourcesForDeletion`); no load, enfileira
-  as camadas de **todos** os frames, não só do corrente.
-- A render thread esvazia a fila no início de cada `drawFrame`
-  (`drainPendingGLDeletions`), onde o contexto está corrente.
-- No resize (que já roda na render thread), os handles antigos são deletados direto —
-  e agora de **todos** os frames; antes só o frame corrente era invalidado, deixando
-  camadas de outros frames com textura do tamanho antigo.
+## Gestão de recursos GL
 
-Ainda não coberto: se o contexto EGL for destruído e recriado (ex.: Surface
-recriada ao voltar do background), os handles guardados nas camadas passam a ser
-inválidos no novo contexto e nada os re-aloca — hoje o `surfaceDestroyed` para a
-engine (`stop`) mas o objeto continua vivo com handles obsoletos. Precisa ser
-tratado junto com o ciclo de vida da Surface.
+`removeLayer` e `loadProjectFromFile` (UI thread, sem contexto) enfileiram handles
+para a render thread deletar em `drawFrame`; o resize (que já roda na render thread)
+deleta direto, em todos os frames.
 
 ## Pipeline de renderização
 
@@ -56,19 +81,18 @@ tratado junto com o ciclo de vida da Surface.
 
 ## Câmera (resumo)
 
-Objeto de cena com chaves por frame (posição/zoom/rotação), easing e hold por
-chave, presets de proporção, caminho visível no overlay — inspirado em Pencil2D
-0.7, OpenToonz e Procreate Dreams.
+Objeto de cena com chaves por frame (posição/zoom/rotação), easing e hold por chave,
+presets de proporção, caminho visível no overlay — inspirado em Pencil2D 0.7,
+OpenToonz e Procreate Dreams.
 
 ## Próximos passos
 
-- **Ciclo de vida da Surface**: ao voltar do background a Surface é recriada; hoje
-  `surfaceCreated` chama `start()` de novo mas `stop()` já encerrou a thread e
-  destruiu o contexto, deixando handles GL obsoletos nas camadas (ver acima). É o
-  risco mais provável de bug visível em uso real.
-- Gerenciador de múltiplos projetos/arquivos.
-- Exportação, onion skinning, seletor de cor livre, opacidade do pincel na UI,
-  cross-fade entre keyframes, undo estrutural, estilo visual dos painéis.
+- **Primeiro build real** no Android Studio (NDK 26.3 + CMake 3.22) e correr os
+  erros que o sandbox não pega (Gradle, JNI, Kotlin).
+- Autoload só na primeira criação (ver ponto de atenção acima).
+- Gerenciador de múltiplos projetos; exportação; onion skinning; seletor de cor
+  livre; opacidade do pincel na UI; cross-fade entre keyframes; undo estrutural;
+  estilo visual dos painéis.
 
 ## Concorrência
 

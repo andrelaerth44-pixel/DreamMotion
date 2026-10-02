@@ -34,12 +34,11 @@ struct RedoRecord {
 
 // Motor de renderização OpenGL ES 3. Ver revisões anteriores (FBO por camada, VBO
 // persistente, playback, keyframes de objeto, pincel, undo/redo, câmera, projeto
-// salvável). Esta revisão corrige um vazamento real: remover uma camada ou
-// carregar um projeto descartava objetos Layer sem liberar as texturas/FBOs
-// OpenGL que eles tinham alocado. Como esses descartes acontecem tipicamente na
-// UI thread (sem o contexto EGL corrente), a deletação de verdade é enfileirada
-// (queueLayerGLResourcesForDeletion) e só executada pela render thread
-// (drainPendingGLDeletions, chamada no início de drawFrame).
+// salvável, fila de deleção de recursos GL). Esta revisão trata o CICLO DE VIDA da
+// Surface: quando o app vai para background a Surface é destruída (stop()) e ao voltar
+// uma nova é criada (start()) — com um contexto EGL NOVO. Os handles GL guardados nas
+// camadas, na cena e no VBO de traços pertenciam ao contexto antigo e não valem
+// mais; resetGLStateForNewContext() os esquece antes do primeiro frame.
 class GLRenderEngine {
 public:
     GLRenderEngine();
@@ -122,15 +121,15 @@ private:
     void destroyEGL();
     void advancePlayback(double deltaMs);
 
+    // Chamada pela render thread logo após initEGL: esquece todos os handles GL do
+    // contexto anterior (ver comentário da classe).
+    void resetGLStateForNewContext();
+
     void drawFrame();
     void ensureLayerTarget(Layer& layer);
     void renderLayerContents(Layer& layer);
     void compositeLayer(const Layer& layer, const Transform& transform);
 
-    // Gestão de recursos GL de camadas descartadas (ver comentário da classe).
-    // queueLayerGLResourcesForDeletion assume timelineMutex_ já travado pelo
-    // chamador (removeLayer, loadProjectFromFile). drainPendingGLDeletions
-    // assume estar rodando na render thread com o contexto EGL corrente.
     void queueLayerGLResourcesForDeletion(Layer& layer);
     void drainPendingGLDeletions();
 
@@ -173,9 +172,6 @@ private:
     int currentFrameIndex_ = 0;
     int activeLayerIndex_ = 0;
 
-    // Handles de textura/FBO de camadas já descartadas, aguardando deletação
-    // pela render thread (ver comentário da classe). Protegidos por
-    // timelineMutex_, como todo o resto do estado de CPU.
     std::vector<GLuint> pendingDeleteTextures_;
     std::vector<GLuint> pendingDeleteFbos_;
 
