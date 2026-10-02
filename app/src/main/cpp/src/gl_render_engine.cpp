@@ -393,6 +393,26 @@ bool GLRenderEngine::cameraHold() {
     return k ? k->hold : false;
 }
 
+// --- Recursos GL de camadas descartadas ---
+
+void GLRenderEngine::queueLayerGLResourcesForDeletion(Layer& layer) {
+    if (layer.textureHandle != -1) pendingDeleteTextures_.push_back((GLuint) layer.textureHandle);
+    if (layer.fboHandle != -1) pendingDeleteFbos_.push_back((GLuint) layer.fboHandle);
+    layer.textureHandle = -1;
+    layer.fboHandle = -1;
+}
+
+void GLRenderEngine::drainPendingGLDeletions() {
+    if (!pendingDeleteTextures_.empty()) {
+        glDeleteTextures((GLsizei) pendingDeleteTextures_.size(), pendingDeleteTextures_.data());
+        pendingDeleteTextures_.clear();
+    }
+    if (!pendingDeleteFbos_.empty()) {
+        glDeleteFramebuffers((GLsizei) pendingDeleteFbos_.size(), pendingDeleteFbos_.data());
+        pendingDeleteFbos_.clear();
+    }
+}
+
 // --- Camadas ---
 
 int GLRenderEngine::layerCount() {
@@ -458,6 +478,9 @@ void GLRenderEngine::removeLayer(int index) {
         activeStroke_ = nullptr;
         activeLayer_ = nullptr;
     }
+    // Enfileira a textura/FBO da camada para a render thread deletar de verdade
+    // (esta chamada vem da UI thread, sem contexto EGL corrente).
+    queueLayerGLResourcesForDeletion(*f->layers[index]);
     f->layers.erase(f->layers.begin() + index);
     if (activeLayerIndex_ >= (int) f->layers.size()) activeLayerIndex_ = (int) f->layers.size() - 1;
 }
@@ -696,6 +719,15 @@ bool GLRenderEngine::loadProjectFromFile(const std::string& path) {
 
     int framerate = root.has("framerate") ? root.get("framerate").asInt(24) : 24;
     if (framerate < 1) framerate = 24;
+
+    // Antes de descartar a timeline antiga, enfileira as texturas/FBOs de TODAS
+    // as camadas de TODOS os frames (nao so do frame corrente) para a render
+    // thread deletar — senao os handles GL ficam orfaos na GPU.
+    for (size_t fi = 0; fi < timeline_.frameCount(); ++fi) {
+        Frame* oldFrame = timeline_.frameAt(fi);
+        if (!oldFrame) continue;
+        for (auto& oldLayer : oldFrame->layers) queueLayerGLResourcesForDeletion(*oldLayer);
+    }
     timeline_.resetEmpty(framerate);
 
     for (const auto& fVal : root.get("frames").items()) {
@@ -881,8 +913,20 @@ void GLRenderEngine::renderLoop() {
                 case RenderCommand::Kind::Resize: {
                     std::lock_guard<std::mutex> lock(timelineMutex_);
                     width_ = (int) cmd.width; height_ = (int) cmd.height;
-                    if (Frame* f = timeline_.frameAt((size_t) currentFrameIndex_)) {
-                        for (auto& l : f->layers) { l->textureHandle = -1; l->fboHandle = -1; l->dirty = true; }
+                    // Estamos na render thread com o contexto corrente, entao deletamos
+                    // direto. Percorre TODOS os frames: antes so o frame corrente era
+                    // invalidado, deixando camadas de outros frames com textura do
+                    // tamanho antigo (e os handles antigos vazando).
+                    for (size_t fi = 0; fi < timeline_.frameCount(); ++fi) {
+                        Frame* f = timeline_.frameAt(fi);
+                        if (!f) continue;
+                        for (auto& l : f->layers) {
+                            if (l->textureHandle != -1) { GLuint t = (GLuint) l->textureHandle; glDeleteTextures(1, &t); }
+                            if (l->fboHandle != -1) { GLuint fb = (GLuint) l->fboHandle; glDeleteFramebuffers(1, &fb); }
+                            l->textureHandle = -1;
+                            l->fboHandle = -1;
+                            l->dirty = true;
+                        }
                     }
                     break;
                 }
@@ -1262,6 +1306,10 @@ void GLRenderEngine::drawCameraOverlay(const CameraPose& pose) {
 
 void GLRenderEngine::drawFrame() {
     std::lock_guard<std::mutex> lock(timelineMutex_);
+
+    // Primeiro: libera de verdade as texturas/FBOs de camadas descartadas desde o
+    // ultimo frame (removeLayer / loadProjectFromFile so enfileiram os handles).
+    drainPendingGLDeletions();
 
     glDisable(GL_SCISSOR_TEST);
     glEnable(GL_BLEND);
